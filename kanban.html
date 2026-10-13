@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Loop — daily kanban</title>
+<title>Loop</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Permanent+Marker&family=Kalam:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -56,6 +56,24 @@
     background:rgba(20,23,28,.92);
     backdrop-filter:blur(8px);
     border-bottom:1px solid var(--border);
+  }
+  #clockWidget{
+    display:flex; flex-direction:column; justify-content:center; cursor:pointer;
+    padding:4px 10px 4px 2px; margin-right:4px; border-radius:8px; user-select:none;
+    transition:background .15s;
+  }
+  #clockWidget:hover{background:var(--panel-2);}
+  #clockTime{font-family:var(--font-mono); font-weight:600; font-size:14px; color:var(--text); line-height:1.2;}
+  #clockDate{font-family:var(--font-mono); font-size:10px; color:var(--text-faint); letter-spacing:.04em; line-height:1.2;}
+  #timerDisplay{
+    font-family:var(--font-mono); font-weight:700; font-size:11.5px; color:var(--ink);
+    margin-top:2px; line-height:1.2; display:flex; align-items:center; gap:4px;
+  }
+  #timerDisplay .pip{width:5px; height:5px; border-radius:50%; background:var(--post-doing-border);}
+  #clockWidget.timer-done{animation:timerflash 1s ease-in-out 3;}
+  @keyframes timerflash{
+    0%,100%{background:transparent;}
+    50%{background:var(--post-todo);}
   }
   .brand{
     font-family:var(--font-display);
@@ -249,6 +267,11 @@
 <body>
 
 <header>
+  <div id="clockWidget" title="Click to set a timer">
+    <div id="clockTime">--:--</div>
+    <div id="clockDate">---</div>
+    <div id="timerDisplay" style="display:none;"></div>
+  </div>
   <div class="brand"><span class="dot">◆</span>Loop<small>daily board</small></div>
   <div class="spacer"></div>
   <button class="iconbtn" id="selectToggleBtn" title="Select items" aria-label="Select items">▤</button>
@@ -366,6 +389,21 @@
       <div class="helptext">Leave all off to repeat weekly on the scheduled date only.</div>
     </div>
     <div class="helptext" id="editScopeNote" style="display:none;">Editing updates this and future occurrences. Past, completed occurrences are untouched.</div>
+    <div class="divider"></div>
+    <div class="row2">
+      <div class="field" style="margin-bottom:0;">
+        <label>List</label>
+        <select id="itemListSelect"></select>
+      </div>
+      <div class="field" style="margin-bottom:0;">
+        <label>Column</label>
+        <select id="itemColumnSelect">
+          <option value="todo">To do</option>
+          <option value="doing">Doing</option>
+          <option value="done">Done</option>
+        </select>
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn" id="itemModalCancel">Cancel</button>
       <button class="btn primary" id="itemModalSave">Save item</button>
@@ -376,6 +414,30 @@
 </div>
 
 <!-- Settings modal -->
+<!-- Timer modal -->
+<div class="overlay" id="timerOverlay">
+  <div class="modal">
+    <h2>Set a timer</h2>
+    <div class="chiprow" id="timerPresets" style="margin-bottom:14px;">
+      <div class="chip" data-m="5">5 min</div>
+      <div class="chip" data-m="10">10 min</div>
+      <div class="chip" data-m="15">15 min</div>
+      <div class="chip" data-m="25">25 min</div>
+      <div class="chip" data-m="60">60 min</div>
+    </div>
+    <div class="field">
+      <label>Or custom (minutes)</label>
+      <input type="number" id="timerCustomInput" min="1" placeholder="e.g. 7">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="timerModalCancel">Cancel</button>
+      <button class="btn primary" id="timerModalStart">Start timer</button>
+    </div>
+    <div class="divider" id="timerCancelDivider" style="display:none;"></div>
+    <button class="btn danger" id="timerCancelBtn" style="display:none; width:100%; justify-content:center;">Cancel running timer</button>
+  </div>
+</div>
+
 <div class="overlay" id="settingsOverlay">
   <div class="modal">
     <h2>Settings</h2>
@@ -977,7 +1039,7 @@ function attachDrag(card){
     card.classList.remove("dragging");
     clearDropHover();
     if(zone && dragItem){
-      moveItem(zone.dataset.listId, dragItem.itemId, zone.dataset.col);
+      moveItemAcross(dragItem.listId, dragItem.itemId, zone.dataset.listId, zone.dataset.col, true);
     }
     dragging=false; dragItem=null;
   });
@@ -988,7 +1050,7 @@ function attachDropZone(zone){
   zone.addEventListener("dragleave",()=> zone.classList.remove("hover"));
   zone.addEventListener("drop",(e)=>{
     e.preventDefault(); zone.classList.remove("hover");
-    if(dragItem){ moveItem(zone.dataset.listId, dragItem.itemId, zone.dataset.col); }
+    if(dragItem){ moveItemAcross(dragItem.listId, dragItem.itemId, zone.dataset.listId, zone.dataset.col, true); }
   });
 }
 
@@ -1026,6 +1088,34 @@ function moveItem(listId, itemId, toCol, viaAdvance){
   }
 }
 function trim(s){ return s.length>28 ? s.slice(0,28)+"…" : s; }
+
+function moveItemAcross(sourceListId, itemId, targetListId, toCol, viaDrag){
+  if(sourceListId === targetListId){
+    moveItem(sourceListId, itemId, toCol, viaDrag);
+    return;
+  }
+  const sourceList = findList(sourceListId);
+  const targetList = findList(targetListId);
+  if(!sourceList || !targetList) return;
+  const idx = sourceList.items.findIndex(i=>i.id===itemId);
+  if(idx===-1) return;
+  const [moved] = sourceList.items.splice(idx,1);
+  const prevCol = moved.column, prevCompletedAt = moved.completedAt;
+  moved.column = toCol;
+  moved.updatedAt = nowISO();
+  moved.completedAt = toCol==="done" ? nowISO() : null;
+  // recurrence and seriesId travel with the item as-is; future spawns will read the
+  // target list's own backfill/retention/eod settings since spawning is computed per-list
+  targetList.items.push(moved);
+  persist(); render();
+  pushUndo(`Moved "${trim(moved.title)}" to ${targetList.name}`, ()=>{
+    const idx2 = targetList.items.findIndex(i=>i.id===itemId);
+    if(idx2>-1) targetList.items.splice(idx2,1);
+    moved.column = prevCol; moved.completedAt = prevCompletedAt; moved.updatedAt = nowISO();
+    sourceList.items.splice(idx,0,moved);
+    persist(); render();
+  });
+}
 
 function deleteItem(listId, itemId){
   const list = findList(listId);
@@ -1167,6 +1257,123 @@ document.querySelectorAll(".overlay").forEach(o=>{
 });
 
 /* ============================================================
+   CLOCK + TIMER
+   ============================================================ */
+const TIMER_LS_KEY = "loop-timer-end";
+let timerEndAt = null; // epoch ms, or null if no timer running
+const clockTimeEl = document.getElementById("clockTime");
+const clockDateEl = document.getElementById("clockDate");
+const timerDisplayEl = document.getElementById("timerDisplay");
+const clockWidgetEl = document.getElementById("clockWidget");
+const timerOverlay = document.getElementById("timerOverlay");
+
+function formatClock(d){
+  let h = d.getHours(); const m = String(d.getMinutes()).padStart(2,"0");
+  const ampm = h>=12 ? "PM":"AM"; h = h%12; if(h===0) h=12;
+  return h+":"+m+" "+ampm;
+}
+function formatClockDate(d){
+  return d.toLocaleDateString(undefined,{weekday:"short", month:"short", day:"numeric"});
+}
+function formatCountdown(ms){
+  const totalSec = Math.max(0, Math.ceil(ms/1000));
+  const m = Math.floor(totalSec/60), s = totalSec%60;
+  return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");
+}
+function playTimerBeep(){
+  try{
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if(!Ctx) return;
+    const ctx = new Ctx();
+    let t = ctx.currentTime;
+    for(let i=0;i<3;i++){
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.18, t+0.02);
+      g.gain.linearRampToValueAtTime(0, t+0.3);
+      o.start(t); o.stop(t+0.32);
+      t += 0.42;
+    }
+    setTimeout(()=>ctx.close(), 1600);
+  }catch(e){ /* audio unavailable, visual alert still fires */ }
+}
+function startTimer(minutes){
+  timerEndAt = Date.now() + minutes*60*1000;
+  try{ localStorage.setItem(TIMER_LS_KEY, String(timerEndAt)); }catch(e){}
+  tickClock();
+}
+function cancelTimer(silent){
+  timerEndAt = null;
+  try{ localStorage.removeItem(TIMER_LS_KEY); }catch(e){}
+  timerDisplayEl.style.display = "none";
+  if(!silent) toast("Timer cancelled");
+}
+function timerFinished(){
+  timerEndAt = null;
+  try{ localStorage.removeItem(TIMER_LS_KEY); }catch(e){}
+  timerDisplayEl.style.display = "none";
+  playTimerBeep();
+  clockWidgetEl.classList.add("timer-done");
+  setTimeout(()=> clockWidgetEl.classList.remove("timer-done"), 3100);
+  toast("⏰ Timer's up!");
+}
+function tickClock(){
+  const now = new Date();
+  clockTimeEl.textContent = formatClock(now);
+  clockDateEl.textContent = formatClockDate(now);
+  if(timerEndAt){
+    const remaining = timerEndAt - Date.now();
+    if(remaining <= 0){ timerFinished(); }
+    else{
+      timerDisplayEl.style.display = "flex";
+      timerDisplayEl.innerHTML = '<span class="pip"></span>'+formatCountdown(remaining);
+    }
+  }
+}
+function initClock(){
+  try{
+    const stored = localStorage.getItem(TIMER_LS_KEY);
+    if(stored){
+      const end = parseInt(stored,10);
+      if(end > Date.now()){ timerEndAt = end; }
+      else{ localStorage.removeItem(TIMER_LS_KEY); toast("A timer finished while Loop was closed."); }
+    }
+  }catch(e){}
+  tickClock();
+  setInterval(tickClock, 1000);
+}
+clockWidgetEl.addEventListener("click", ()=>{
+  if(timerEndAt){
+    askConfirm("Cancel the running timer?", "This stops the countdown.", [
+      {label:"Cancel timer", cls:"btn danger", action:()=>cancelTimer(false)}
+    ]);
+    return;
+  }
+  document.getElementById("timerCustomInput").value = "";
+  document.querySelectorAll("#timerPresets .chip").forEach(c=>c.classList.remove("active"));
+  document.getElementById("timerCancelBtn").style.display = "none";
+  document.getElementById("timerCancelDivider").style.display = "none";
+  openOverlay(timerOverlay);
+});
+document.querySelectorAll("#timerPresets .chip").forEach(c=>{
+  c.addEventListener("click", ()=>{
+    document.querySelectorAll("#timerPresets .chip").forEach(x=>x.classList.remove("active"));
+    c.classList.add("active");
+    document.getElementById("timerCustomInput").value = c.dataset.m;
+  });
+});
+document.getElementById("timerModalCancel").addEventListener("click", ()=> closeOverlay(timerOverlay));
+document.getElementById("timerModalStart").addEventListener("click", ()=>{
+  const mins = parseInt(document.getElementById("timerCustomInput").value,10);
+  if(!mins || mins<=0){ toast("Enter a number of minutes first."); return; }
+  startTimer(mins);
+  closeOverlay(timerOverlay);
+  toast(`Timer set for ${mins} minute${mins===1?"":"s"}`);
+});
+
+/* ============================================================
    LIST MODAL (add/edit)
    ============================================================ */
 let editingListId = null;
@@ -1287,6 +1494,17 @@ function openItemModal(listId, itemId){
   document.getElementById("editScopeNote").style.display = (item && item.recurrence) ? "block":"none";
   document.getElementById("itemDeleteBtn").style.display = item ? "block":"none";
   document.getElementById("itemDeleteDivider").style.display = item ? "block":"none";
+
+  const listSelect = document.getElementById("itemListSelect");
+  listSelect.innerHTML = "";
+  for(const l of STATE.lists){
+    const opt = document.createElement("option");
+    opt.value = l.id; opt.textContent = l.name;
+    if(l.id===listId) opt.selected = true;
+    listSelect.appendChild(opt);
+  }
+  document.getElementById("itemColumnSelect").value = item ? item.column : "todo";
+
   openOverlay(itemModalOverlay);
 }
 document.querySelectorAll("#recurChips .chip").forEach(c=>{
@@ -1310,21 +1528,29 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
       anchorDate: scheduledFor };
   }
   const {listId, itemId} = editingItemCtx;
-  const list = findList(listId);
+  const targetListId = document.getElementById("itemListSelect").value || listId;
+  const targetCol = document.getElementById("itemColumnSelect").value || "todo";
   if(itemId){
     const item = findItem(listId,itemId);
     item.title = title; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
     if(recurrence){ recurrence.anchorDate = item.recurrence ? item.recurrence.anchorDate : scheduledFor; }
     item.recurrence = recurrence;
+    const curCol = item.column;
+    persist(); render(); // save field edits regardless of whether list/column also changed
+    closeOverlay(itemModalOverlay);
+    if(targetListId !== listId || targetCol !== curCol){
+      moveItemAcross(listId, itemId, targetListId, targetCol, true);
+    }
   } else {
+    const list = findList(targetListId);
     list.items.push({
-      id: uid("item"), seriesId: uid("series"), title, column:"todo",
-      createdAt: nowISO(), updatedAt: nowISO(), scheduledFor, completedAt:null,
+      id: uid("item"), seriesId: uid("series"), title, column: targetCol,
+      createdAt: nowISO(), updatedAt: nowISO(), scheduledFor, completedAt: targetCol==="done" ? nowISO() : null,
       recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false
     });
+    persist(); render();
+    closeOverlay(itemModalOverlay);
   }
-  persist(); render();
-  closeOverlay(itemModalOverlay);
 });
 document.getElementById("itemDeleteBtn").addEventListener("click", ()=>{
   const {listId, itemId} = editingItemCtx;
@@ -1560,6 +1786,7 @@ function resolveCollisions(collisions, i, done){
    BOOT
    ============================================================ */
 init();
+initClock();
 
 })();
 </script>
