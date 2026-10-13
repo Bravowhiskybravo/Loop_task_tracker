@@ -1,6 +1,6 @@
-# Loop — a daily kanban board
+# Loop task tracker — a daily kanban board
 
-A single-file, local-first kanban board for recurring and one-off daily tasks. No login, no backend, no tracking — everything lives in your browser.
+A single-file, local-first kanban board for recurring and one-off daily tasks. No login, no backend, no tracking.
 
 Built to run straight off GitHub Pages as one HTML file.
 
@@ -89,7 +89,6 @@ Recurring items are flat, not template + instance: a card carries its own recurr
 ## Backlog / ideas for later
 
 - Native push notifications via a wrapped app (Capacitor/Tauri) or a small backend
-- Real-time collaborative lists (would need a sync layer — breaks the pure local-first model, so deliberately deferred)
+- Real-time collaborative lists (would need a sync layer)
 - Custom columns beyond To do / Doing / Done
-- Series-level edit scope (edit this occurrence vs. all future occurrences — currently editing always applies forward)
 - CSV/text import
