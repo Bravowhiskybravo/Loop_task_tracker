@@ -23,17 +23,10 @@ Built to run straight off GitHub Pages as one HTML file.
 
 ## Tech stack
 
-- Vanilla HTML/CSS/JS, no build step, no framework, no dependencies
+- Vanilla HTML/CSS/JS 
 - Storage: IndexedDB, with an automatic localStorage fallback if IndexedDB is unavailable or its connection drops
 - Fonts: Permanent Marker + Kalam (handwritten/marker feel) for headings and task text, IBM Plex Mono for controls and metadata
 
-## Deploying to GitHub Pages
-
-1. Drop `kanban.html` into a repo (rename to `index.html` if you want it at the root of the Pages URL)
-2. Settings → Pages → set the source branch/folder
-3. Done — it's fully static, nothing else to configure
-
-You can also just open the file directly in a browser (`file://`) for local use, though IndexedDB behaves more reliably served over `http(s)`.
 
 ## Data model (JSON export shape)
 
@@ -79,16 +72,10 @@ You can also just open the file directly in a browser (`file://`) for local use,
 
 Recurring items are flat, not template + instance: a card carries its own recurrence rule, and the next occurrence spawns automatically once the current one reaches Done. All occurrences of the same recurring item share a `seriesId`. `recurrence` is omitted entirely for one-off items. Moving a recurring item to a different list keeps it repeating — future occurrences just inherit that list's backfill/retention/end-of-day settings instead of its original list's.
 
-## Known limitations (v1)
+## Known limitations
 
 - **No push notifications.** Static hosting can't wake the app in the background — reminders, and the built-in timer alert, only fire while the tab is open.
 - **No real-time collaboration.** Sharing is export/import only; two people editing the same list won't sync live.
 - **Browser storage isn't guaranteed forever.** Safari and some mobile browsers can evict local storage if the site goes unvisited for a long stretch. Export a JSON backup periodically if your data matters.
 - **CSV/text exports are one-way.** Only JSON round-trips back into the app.
 
-## Backlog / ideas for later
-
-- Native push notifications via a wrapped app (Capacitor/Tauri) or a small backend
-- Real-time collaborative lists (would need a sync layer)
-- Custom columns beyond To do / Doing / Done
-- CSV/text import
