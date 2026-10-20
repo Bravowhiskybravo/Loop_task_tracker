@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Loop</title>
+<title>◆ Loop - Task Organizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Permanent+Marker&family=Kalam:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -83,7 +83,7 @@
     display:flex; align-items:baseline; gap:6px;
     color:#f6f6f2;
   }
-  .brand .dot{color:#f6f6f2;}
+  .brand .dot{color:#b9b17f;}
   .brand small{font-family:var(--font-mono); font-weight:500; font-size:10px; color:var(--text-faint); letter-spacing:.08em; text-transform:uppercase;}
   .spacer{flex:1;}
   .iconbtn{
@@ -273,7 +273,7 @@
     <div id="clockDate">---</div>
     <div id="timerDisplay" style="display:none;"></div>
   </div>
-  <div class="brand"><span class="dot">◆</span>Loop  <small>daily board</small></div>
+  <div class="brand"><span class="dot">◆</span>Loop<small>daily board</small></div>
   <div class="spacer"></div>
   <button class="iconbtn" id="selectToggleBtn" title="Select items" aria-label="Select items">▤</button>
   <button class="iconbtn" id="importBtn" title="Import" aria-label="Import">⇩</button>
@@ -434,8 +434,6 @@
       <button class="btn" id="timerModalCancel">Cancel</button>
       <button class="btn primary" id="timerModalStart">Start timer</button>
     </div>
-    <div class="divider" id="timerCancelDivider" style="display:none;"></div>
-    <button class="btn danger" id="timerCancelBtn" style="display:none; width:100%; justify-content:center;">Cancel running timer</button>
   </div>
 </div>
 
@@ -707,17 +705,20 @@ function runDayBoundaryPass(state){
     const toAdd = [];
     for(const item of list.items){
       if(item.column === "done" && item.recurrence && !item._spawned){
-        item._spawned = true; // mark so we never double spawn from this instance
         let due = nextDueDate(item.recurrence, item.scheduledFor);
         if(due === null) continue;
-        if(due > today) continue; // not due yet, nothing to spawn
+        if(due > today) continue; // not due yet — leave _spawned false so we re-check next time
+
+        item._spawned = true; // only now, since we're actually about to spawn
 
         if(list.backfillEnabled){
           // spawn one instance per missed occurrence, capped to avoid runaway growth
           let cursor = due, guard = 0;
           while(cursor <= today && guard < 60){
             const isStale = cursor < today;
-            toAdd.push(makeInstance(item, cursor, isStale, cursor));
+            const inst = makeInstance(item, cursor, isStale, cursor);
+            if(isStale) inst._spawned = true; // historical catch-up card; only the final (today's) instance continues the series
+            toAdd.push(inst);
             spawnedCount++;
             if(isStale) caughtUpDays++;
             cursor = nextDueDate(item.recurrence, cursor);
@@ -760,7 +761,7 @@ function runRetentionSweep(state){
     const before = list.items.length;
     list.items = list.items.filter(it=>{
       if(it.column!=="done") return true;
-      const day = it.completedAt ? it.completedAt.slice(0,10) : it.scheduledFor;
+      const day = it.completedAt ? dateToISO(new Date(it.completedAt)) : it.scheduledFor;
       return day >= cutoff;
     });
     removed += before - list.items.length;
@@ -799,18 +800,29 @@ async function init(){
   loaded.settings = Object.assign(defaultSettings(), loaded.settings||{});
   STATE = loaded;
 
+  recheckDayBoundary();
+  render();
+}
+
+/* Re-run the rollover/spawn/retention pass against the current state. Called on load,
+   and again whenever the tab regains focus or on a periodic timer — if a tab is left
+   open across a day boundary without a reload, nothing would otherwise re-evaluate it. */
+function recheckDayBoundary(){
+  if(!STATE) return;
   const {rolledCount, spawnedCount, caughtUpDays} = runDayBoundaryPass(STATE);
   const removed = runRetentionSweep(STATE);
-  if(spawnedCount || rolledCount){
+  if(spawnedCount || rolledCount || removed){
     persist();
+    render();
   }
   if(caughtUpDays>0){
     toast(`Caught up ${caughtUpDays} missed day${caughtUpDays===1?"":"s"} across your recurring items.`);
   } else if(rolledCount>0){
     toast(`${rolledCount} item${rolledCount===1?"":"s"} rolled over from a previous day.`);
   }
-  render();
 }
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) recheckDayBoundary(); });
+setInterval(recheckDayBoundary, 5*60*1000);
 
 /* ============================================================
    RENDER
@@ -970,11 +982,8 @@ function renderCard(list, item, idx){
       lastTap = now;
     }
   });
-  card.addEventListener("dblclick", ()=>{
-    if(!selectMode) advanceColumn(list.id, item.id);
-  });
   card.addEventListener("keydown",(e)=>{
-    if(e.key==="Enter"){ advanceColumn(list.id, item.id); }
+    if(e.key==="Enter"){ if(selectMode) toggleSelect(item.id); else advanceColumn(list.id, item.id); }
     if(e.key===" "){ e.preventDefault(); if(selectMode) toggleSelect(item.id); else openItemModal(list.id, item.id); }
   });
   // long press or explicit edit via context: simple - a second tap-hold isn't reliable cross-browser,
@@ -1001,6 +1010,7 @@ function recurrenceLabel(r){
    ============================================================ */
 function attachDrag(card){
   card.addEventListener("dragstart",(e)=>{
+    if(selectMode){ e.preventDefault(); return; }
     dragItem = {itemId: card.dataset.itemId, listId: card.dataset.listId};
     card.classList.add("dragging");
     e.dataTransfer.effectAllowed = "move";
@@ -1354,8 +1364,6 @@ clockWidgetEl.addEventListener("click", ()=>{
   }
   document.getElementById("timerCustomInput").value = "";
   document.querySelectorAll("#timerPresets .chip").forEach(c=>c.classList.remove("active"));
-  document.getElementById("timerCancelBtn").style.display = "none";
-  document.getElementById("timerCancelDivider").style.display = "none";
   openOverlay(timerOverlay);
 });
 document.querySelectorAll("#timerPresets .chip").forEach(c=>{
@@ -1419,7 +1427,7 @@ document.getElementById("listModalSave").addEventListener("click", ()=>{
     const clash = STATE.lists.find(l=>l.id!==editingListId && l.name.trim().toLowerCase()===name.trim().toLowerCase());
     if(clash){
       closeOverlay(listModalOverlay);
-      askConfirm("Name matches another list", `You already have a list named "${name}". Keep this as a separate list, or rename cancelled?`, [
+      askConfirm("Name matches another list", `You already have a list named "${name}". You can keep this as its own separate list, or cancel and pick a different name.`, [
         {label:"Keep separate", cls:"btn primary", action:()=>{ applyListEdit(list,name,retentionMode,retentionDays,backfillEnabled,eodTime); }},
       ]);
       return;
@@ -1711,6 +1719,7 @@ function replaceImport(data){
   STATE.lists = data.lists.map(l=>normalizeImportedList(l));
   if(data.settings) STATE.settings = Object.assign(defaultSettings(), data.settings);
   runDayBoundaryPass(STATE);
+  runRetentionSweep(STATE);
   persist(); render();
   toast("Board replaced", ()=>{ STATE = prevState; persist(); render(); });
 }
@@ -1754,11 +1763,13 @@ function mergeImport(data){
   if(collisions.length>0){
     resolveCollisions(collisions, 0, ()=>{
       runDayBoundaryPass(STATE);
+      runRetentionSweep(STATE);
       persist(); render();
       toast("Board merged", ()=>{ STATE = prevState; persist(); render(); });
     });
   } else {
     runDayBoundaryPass(STATE);
+    runRetentionSweep(STATE);
     persist(); render();
     toast("Board merged", ()=>{ STATE = prevState; persist(); render(); });
   }
