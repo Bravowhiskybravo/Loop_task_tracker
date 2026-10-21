@@ -1,4 +1,4 @@
-# Loop — a daily kanban board
+# Loop — Task Tracker
 
 A single-file, local-first kanban board for recurring and one-off daily tasks. Entries live in cookies, no account needed. 
 
