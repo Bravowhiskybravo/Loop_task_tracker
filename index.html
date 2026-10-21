@@ -390,6 +390,13 @@
       <div class="helptext">Leave all off to repeat weekly on the scheduled date only.</div>
     </div>
     <div class="helptext" id="editScopeNote" style="display:none;">Editing updates this and future occurrences. Past, completed occurrences are untouched.</div>
+    <div class="field" id="stickyField" style="display:none; margin-top:14px;">
+      <label>If missed (calendar event)</label>
+      <div class="chiprow" id="stickyChips">
+        <div class="chip" data-v="off">Stay put</div>
+        <div class="chip" data-v="on">Roll over (sticky)</div>
+      </div>
+    </div>
     <div class="divider"></div>
     <div class="row2">
       <div class="field" style="margin-bottom:0;">
@@ -485,9 +492,9 @@
 <!-- Import modal -->
 <div class="overlay" id="importOverlay">
   <div class="modal">
-    <h2>Import JSON</h2>
+    <h2>Import</h2>
     <div class="field">
-      <label>File</label>
+      <label>Loop JSON file</label>
       <input type="file" id="importFile" accept="application/json">
     </div>
     <div id="importModeArea" style="display:none;">
@@ -500,7 +507,34 @@
         </div>
       </div>
     </div>
+    <div class="divider"></div>
+    <div class="field">
+      <label>Calendar file (.ics)</label>
+      <input type="file" id="icsFile" accept=".ics,text/calendar">
+      <div class="helptext">Export from Google, Apple or Outlook Calendar. Past events are skipped.</div>
+    </div>
     <div class="modal-actions"><button class="btn" id="importClose" style="width:100%; justify-content:center;">Cancel</button></div>
+  </div>
+</div>
+
+<!-- Calendar import preview -->
+<div class="overlay" id="icsOverlay">
+  <div class="modal">
+    <h2>Import calendar</h2>
+    <div class="field">
+      <label>Add to list</label>
+      <select id="icsListSelect"></select>
+    </div>
+    <div class="field">
+      <label>Only events within the next (days)</label>
+      <input type="number" id="icsWindowInput" min="0" placeholder="No limit">
+      <div class="helptext">Blank or 0 = no limit. Past events are always skipped.</div>
+    </div>
+    <div id="icsSummary" style="font-size:13px; line-height:1.6; white-space:pre-line;"></div>
+    <div class="modal-actions">
+      <button class="btn" id="icsCancel">Cancel</button>
+      <button class="btn primary" id="icsConfirm">Import</button>
+    </div>
   </div>
 </div>
 
@@ -645,7 +679,7 @@ function debounce(fn,ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(
    DEFAULT / EMPTY STATE
    ============================================================ */
 function defaultSettings(){
-  return { defaultRetentionMode:"keep", defaultRetentionDays:30, defaultBackfillEnabled:true, defaultEodTime:"00:00" };
+  return { defaultRetentionMode:"keep", defaultRetentionDays:30, defaultBackfillEnabled:true, defaultEodTime:"00:00", calendarWindowDays:90 };
 }
 function freshState(){
   return { settings: defaultSettings(), lists: [] };
@@ -683,15 +717,31 @@ function nextDueDate(recurrence, fromISO){
   }
 }
 
+function nextOccurrenceOnOrAfter(rec, fromISO, todayISO){
+  let c = nextDueDate(rec, fromISO), g = 0;
+  while(c && c < todayISO && g++ < 20000) c = nextDueDate(rec, c);
+  if(c && rec.until && c > rec.until) return null;
+  return c;
+}
+
 /* Run once on load (and after import). Mutates state.lists in place. Returns a summary for toast. */
 function runDayBoundaryPass(state){
   let rolledCount = 0, spawnedCount = 0, caughtUpDays = 0;
+  const seriesOpen = new Set(); // series that already got a spawn during this pass
   for(const list of state.lists){
     const today = todayISO(list.eodTime);
 
     // 1) stale non-done items (todo/doing) that haven't reached today -> roll over in place
     for(const item of list.items){
       if(item.column !== "done" && item.scheduledFor && item.scheduledFor < today){
+        if(item.source === "ics" && !item.sticky){
+          // calendar events stay put when missed; untouched repeating ones advance to their next occurrence
+          if(item.recurrence && item.column === "todo"){
+            const nxt = nextOccurrenceOnOrAfter(item.recurrence, item.scheduledFor, today);
+            if(nxt){ item.scheduledFor = nxt; item.updatedAt = nowISO(); }
+          }
+          continue;
+        }
         if(!item.rollover) item.rollover = {isRolledOver:false, rolledFrom:null};
         if(!item.rollover.isRolledOver) item.rollover.rolledFrom = item.scheduledFor;
         item.rollover.isRolledOver = true;
@@ -703,32 +753,49 @@ function runDayBoundaryPass(state){
 
     // 2) done + recurring items that haven't spawned their next occurrence yet
     const toAdd = [];
+    const sidOf = x => x.seriesId || x.id;
+    const dateTaken = (sid, date) =>
+      state.lists.some(l=>l.items.some(x=>sidOf(x)===sid && x.scheduledFor===date)) ||
+      toAdd.some(x=>sidOf(x)===sid && x.scheduledFor===date);
     for(const item of list.items){
       if(item.column === "done" && item.recurrence && !item._spawned){
+        const sid = sidOf(item);
+        // never spawn if this series already has a live (not-done) card somewhere on the board
+        if(seriesOpen.has(sid) || state.lists.some(l=>l.items.some(x=>x!==item && x.column!=="done" && sidOf(x)===sid))){
+          item._spawned = true; continue;
+        }
         let due = nextDueDate(item.recurrence, item.scheduledFor);
         if(due === null) continue;
         if(due > today) continue; // not due yet — leave _spawned false so we re-check next time
 
         item._spawned = true; // only now, since we're actually about to spawn
+        seriesOpen.add(sid);
+
+        if(item.source === "ics"){
+          const occ = nextOccurrenceOnOrAfter(item.recurrence, item.scheduledFor, today);
+          if(occ && !dateTaken(sid, occ)){ toAdd.push(makeInstance(item, occ, false, null)); spawnedCount++; }
+          continue;
+        }
 
         if(list.backfillEnabled){
           // spawn one instance per missed occurrence, capped to avoid runaway growth
           let cursor = due, guard = 0;
           while(cursor <= today && guard < 60){
             const isStale = cursor < today;
-            const inst = makeInstance(item, cursor, isStale, cursor);
-            if(isStale) inst._spawned = true; // historical catch-up card; only the final (today's) instance continues the series
-            toAdd.push(inst);
-            spawnedCount++;
-            if(isStale) caughtUpDays++;
+            if(!dateTaken(sid, cursor)){
+              const inst = makeInstance(item, cursor, isStale, cursor);
+              if(isStale) inst._spawned = true; // historical catch-up card; only the final (today's) instance continues the series
+              toAdd.push(inst);
+              spawnedCount++;
+              if(isStale) caughtUpDays++;
+            }
             cursor = nextDueDate(item.recurrence, cursor);
             guard++;
             if(cursor===null) break;
           }
         } else {
           // jump straight to today, single instance, no pile-up
-          toAdd.push(makeInstance(item, today, false, null));
-          spawnedCount++;
+          if(!dateTaken(sid, today)){ toAdd.push(makeInstance(item, today, false, null)); spawnedCount++; }
         }
       }
     }
@@ -748,7 +815,8 @@ function makeInstance(sourceItem, scheduledFor, markRolled, rolledFrom){
     completedAt: null,
     recurrence: sourceItem.recurrence ? {...sourceItem.recurrence} : undefined,
     rollover: { isRolledOver: !!markRolled, rolledFrom: markRolled ? rolledFrom : null },
-    _spawned: false
+    _spawned: false,
+    source: sourceItem.source, externalId: sourceItem.externalId, sticky: sourceItem.sticky, eventTime: sourceItem.eventTime
   };
 }
 
@@ -957,6 +1025,18 @@ function renderCard(list, item, idx){
     const t = document.createElement("span");
     t.className = "tag recur";
     t.textContent = "↻ " + recurrenceLabel(item.recurrence);
+    meta.appendChild(t);
+  }
+  if(item.eventTime){
+    const t = document.createElement("span");
+    t.className = "tag";
+    t.textContent = "◷ " + item.eventTime;
+    meta.appendChild(t);
+  }
+  if(item.source === "ics"){
+    const t = document.createElement("span");
+    t.className = "tag";
+    t.textContent = item.sticky ? "▦ cal · sticky" : "▦ cal";
     meta.appendChild(t);
   }
   if(item.rollover && item.rollover.isRolledOver){
@@ -1513,6 +1593,8 @@ function openItemModal(listId, itemId){
     listSelect.appendChild(opt);
   }
   document.getElementById("itemColumnSelect").value = item ? item.column : "todo";
+  document.getElementById("stickyField").style.display = (item && item.source==="ics") ? "block":"none";
+  setChip("stickyChips", item && item.sticky ? "on":"off");
 
   openOverlay(itemModalOverlay);
 }
@@ -1543,7 +1625,9 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
     const item = findItem(listId,itemId);
     item.title = title; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
     if(recurrence){ recurrence.anchorDate = item.recurrence ? item.recurrence.anchorDate : scheduledFor; }
+    if(recurrence && item.recurrence && item.recurrence.until) recurrence.until = item.recurrence.until;
     item.recurrence = recurrence;
+    if(item.source === "ics") item.sticky = document.querySelector("#stickyChips .chip.active").dataset.v === "on";
     const curCol = item.column;
     persist(); render(); // save field edits regardless of whether list/column also changed
     closeOverlay(itemModalOverlay);
@@ -1673,6 +1757,7 @@ const importOverlay = document.getElementById("importOverlay");
 let pendingImportData = null;
 document.getElementById("importBtn").addEventListener("click", ()=>{
   document.getElementById("importFile").value = "";
+  document.getElementById("icsFile").value = "";
   document.getElementById("importModeArea").style.display = "none";
   pendingImportData = null;
   openOverlay(importOverlay);
@@ -1734,7 +1819,8 @@ function normalizeImportedList(l){
       column: it.column || "todo", createdAt: it.createdAt || nowISO(), updatedAt: it.updatedAt || nowISO(),
       scheduledFor: it.scheduledFor || todayISO("00:00"), completedAt: it.completedAt || null,
       recurrence: it.recurrence || undefined,
-      rollover: it.rollover || {isRolledOver:false, rolledFrom:null}, _spawned: !!it._spawned
+      rollover: it.rollover || {isRolledOver:false, rolledFrom:null}, _spawned: !!it._spawned,
+      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime
     }))
   };
 }
@@ -1793,6 +1879,202 @@ function resolveCollisions(collisions, i, done){
     }},
   ]);
 }
+
+/* ============================================================
+   CALENDAR (.ics) IMPORT
+   ============================================================ */
+const icsOverlay = document.getElementById("icsOverlay");
+let pendingIcs = null;
+document.querySelectorAll("#stickyChips .chip").forEach(c=>c.addEventListener("click", ()=> setChip("stickyChips", c.dataset.v)));
+
+function fmtTime12(h,m){ const ap=h>=12?"PM":"AM"; let hh=h%12; if(hh===0) hh=12; return hh+":"+String(m).padStart(2,"0")+" "+ap; }
+function parseIcsDate(v){
+  const m = String(v).trim().match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/);
+  if(!m) return null;
+  const [,y,mo,d,h,mi,sec,z] = m;
+  if(h===undefined) return {date:`${y}-${mo}-${d}`, time:null, allDay:true};
+  if(z){ const dt = new Date(Date.UTC(+y,+mo-1,+d,+h,+mi,+(sec||0))); return {date:dateToISO(dt), time:fmtTime12(dt.getHours(),dt.getMinutes()), allDay:false}; }
+  return {date:`${y}-${mo}-${d}`, time:fmtTime12(+h,+mi), allDay:false};
+}
+function parseICS(text){
+  const lines = text.replace(/\r\n/g,"\n").replace(/\r/g,"\n").replace(/\n[ \t]/g,"").split("\n");
+  const events = []; let cur = null, alarm = 0;
+  for(const line of lines){
+    const up = line.trim().toUpperCase();
+    if(up==="BEGIN:VEVENT"){ cur = {exdates:[]}; alarm = 0; continue; }
+    if(up==="END:VEVENT"){ if(cur) events.push(cur); cur = null; continue; }
+    if(!cur) continue;
+    if(up==="BEGIN:VALARM"){ alarm++; continue; }
+    if(up==="END:VALARM"){ alarm = Math.max(0,alarm-1); continue; }
+    if(alarm>0) continue;
+    const i = line.indexOf(":"); if(i<1) continue;
+    const name = line.slice(0,i).split(";")[0].toUpperCase(), val = line.slice(i+1);
+    if(name==="UID") cur.uid = val.trim();
+    else if(name==="SUMMARY") cur.summary = val.replace(/\\[nN]/g," ").replace(/\\([,;\\])/g,"$1").trim();
+    else if(name==="DTSTART") cur.start = parseIcsDate(val);
+    else if(name==="DTEND") cur.end = parseIcsDate(val);
+    else if(name==="RRULE") cur.rrule = val;
+    else if(name==="EXDATE") val.split(",").forEach(x=>{ const d = parseIcsDate(x); if(d) cur.exdates.push(d.date); });
+    else if(name==="STATUS") cur.status = val.trim().toUpperCase();
+    else if(name==="RECURRENCE-ID") cur.isOverride = true;
+  }
+  return events;
+}
+/* Map an RRULE onto Loop's recurrence model; null = too complex to represent */
+function icsRecurrenceFromRule(rrule, startISO){
+  const r = {}; rrule.split(";").forEach(p=>{ const i=p.indexOf("="); if(i>0) r[p.slice(0,i).toUpperCase()] = p.slice(i+1); });
+  const freq = (r.FREQ||"").toUpperCase(), interval = parseInt(r.INTERVAL||"1",10) || 1;
+  const byday = r.BYDAY ? r.BYDAY.toUpperCase().split(",") : null;
+  if(byday && byday.some(b=>!/^(SU|MO|TU|WE|TH|FR|SA)$/.test(b))) return null;
+  if(r.BYSETPOS || r.BYYEARDAY || r.BYWEEKNO) return null;
+  const sd = parseInt(startISO.slice(8,10),10), sm = parseInt(startISO.slice(5,7),10);
+  let rec;
+  if(freq==="DAILY"){
+    if(byday || r.BYMONTHDAY) return null;
+    rec = interval===1 ? {type:"daily",interval:1,daysOfWeek:null} : {type:"everyXDays",interval,daysOfWeek:null};
+  } else if(freq==="WEEKLY"){
+    if(r.BYMONTHDAY) return null;
+    if(interval===1) rec = {type:"weekly",interval:1,daysOfWeek:byday};
+    else if(!byday || (byday.length===1 && byday[0]===dowCode(startISO))) rec = {type:"everyXDays",interval:interval*7,daysOfWeek:null};
+    else return null;
+  } else if(freq==="MONTHLY"){
+    if(byday || interval!==1 || sd>28) return null;
+    if(r.BYMONTHDAY && parseInt(r.BYMONTHDAY,10)!==sd) return null;
+    rec = {type:"monthly",interval:1,daysOfWeek:null};
+  } else if(freq==="YEARLY"){
+    if(byday || interval!==1 || r.BYMONTHDAY || (sm===2 && sd===29)) return null;
+    if(r.BYMONTH && parseInt(r.BYMONTH,10)!==sm) return null;
+    rec = {type:"yearly",interval:1,daysOfWeek:null};
+  } else return null;
+  rec.anchorDate = startISO;
+  if(r.UNTIL){ const u = parseIcsDate(r.UNTIL); if(u) rec.until = u.date; }
+  else if(r.COUNT){ const n = Math.min(parseInt(r.COUNT,10)||0, 5000); if(n>=1){ let c = startISO; for(let i=1;i<n && c;i++) c = nextDueDate(rec,c); if(c) rec.until = c; } }
+  return rec;
+}
+function eventEndDate(ev){
+  if(!ev.end) return ev.start.date;
+  const e = ev.start.allDay ? addDays(ev.end.date,-1) : ev.end.date;
+  return e < ev.start.date ? ev.start.date : e;
+}
+/* Decide what (if anything) to import for one event */
+function planIcsEvent(ev, today, limit){
+  if(ev.isOverride) return {skip:"override"};
+  if(ev.status==="CANCELLED") return {skip:"cancelled"};
+  if(!ev.start) return {skip:"invalid"};
+  const title = ev.summary || "(No title)";
+  const uid = ev.uid || ("noid_"+title+"_"+ev.start.date);
+  let scheduledFor = null, recurrence, simplified = false;
+  if(ev.rrule){
+    const rec = icsRecurrenceFromRule(ev.rrule, ev.start.date);
+    if(!rec){
+      if(ev.start.date < today) return {skip:"complex"};
+      simplified = true;
+    } else {
+      const ex = new Set(ev.exdates);
+      let occ = ev.start.date >= today ? ev.start.date : nextOccurrenceOnOrAfter(rec, ev.start.date, today), g = 0;
+      while(occ && ex.has(occ) && g++ < 400){ occ = nextDueDate(rec,occ); if(occ && rec.until && occ > rec.until) occ = null; }
+      if(!occ) return {skip:"ended"};
+      scheduledFor = occ; recurrence = rec;
+    }
+  }
+  if(!scheduledFor){
+    if(eventEndDate(ev) < today) return {skip:"past"};
+    scheduledFor = ev.start.date < today ? today : ev.start.date;
+  }
+  if(limit && scheduledFor > limit) return {skip:"beyond"};
+  return {uid, title, scheduledFor, recurrence, eventTime: ev.start.time || null, simplified};
+}
+function findIcsItem(uid){
+  for(const l of STATE.lists) for(const it of l.items) if(it.source==="ics" && it.externalId===uid) return it;
+  return null;
+}
+function buildIcsPlan(){
+  const days = parseInt(document.getElementById("icsWindowInput").value,10);
+  const sel = document.getElementById("icsListSelect").value;
+  const target = sel==="__new__" ? null : findList(sel);
+  const today = todayISO(target ? target.eodTime : STATE.settings.defaultEodTime);
+  const limit = days>0 ? addDays(today, days) : null;
+  const c = {fresh:0, updated:0, unchanged:0, past:0, beyond:0, ended:0, complex:0, simplified:0};
+  const actions = [], seen = new Set();
+  for(const ev of pendingIcs.events){
+    const r = planIcsEvent(ev, today, limit);
+    if(r.skip){ if(c[r.skip]!==undefined) c[r.skip]++; continue; }
+    if(seen.has(r.uid)) continue; seen.add(r.uid);
+    if(r.simplified) c.simplified++;
+    const ex = findIcsItem(r.uid);
+    if(!ex){ c.fresh++; actions.push({type:"new", r}); continue; }
+    if(ex.recurrence){ c.unchanged++; continue; }
+    const rolled = ex.rollover && ex.rollover.isRolledOver;
+    if(ex.title!==r.title || ex.eventTime!==r.eventTime || (!rolled && ex.scheduledFor!==r.scheduledFor)){ c.updated++; actions.push({type:"update", ex, r}); }
+    else c.unchanged++;
+  }
+  return {c, actions, target, days};
+}
+function refreshIcsPreview(){
+  const {c} = buildIcsPlan();
+  const lines = [`${c.fresh} new, ${c.updated} updated, ${c.unchanged} already imported`];
+  const sk = [];
+  if(c.past) sk.push(`${c.past} past`);
+  if(c.ended) sk.push(`${c.ended} ended repeating`);
+  if(c.beyond) sk.push(`${c.beyond} beyond the window`);
+  if(c.complex) sk.push(`${c.complex} complex repeating (can't convert)`);
+  if(sk.length) lines.push("Skipping: " + sk.join(", "));
+  if(c.simplified) lines.push(`${c.simplified} complex repeating event(s) imported as a single event`);
+  document.getElementById("icsSummary").textContent = lines.join("\n");
+  document.getElementById("icsConfirm").disabled = (c.fresh + c.updated)===0;
+}
+function openIcsPreview(){
+  const sel = document.getElementById("icsListSelect");
+  sel.innerHTML = "";
+  const calList = STATE.lists.find(l=>l.name.trim().toLowerCase()==="calendar");
+  const o = document.createElement("option"); o.value="__new__"; o.textContent="New list: Calendar"; sel.appendChild(o);
+  for(const l of STATE.lists){ const x = document.createElement("option"); x.value=l.id; x.textContent=l.name; sel.appendChild(x); }
+  sel.value = calList ? calList.id : "__new__";
+  const w = STATE.settings.calendarWindowDays;
+  document.getElementById("icsWindowInput").value = w>0 ? w : "";
+  refreshIcsPreview();
+  openOverlay(icsOverlay);
+}
+document.getElementById("icsFile").addEventListener("change", async (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  try{
+    const text = await file.text();
+    if(!/BEGIN:VCALENDAR/i.test(text)) throw new Error("not ics");
+    const events = parseICS(text);
+    if(!events.length) throw new Error("empty");
+    pendingIcs = {events};
+    closeOverlay(importOverlay);
+    openIcsPreview();
+  }catch(err){ toast("That doesn't look like a calendar (.ics) file with events."); }
+});
+document.getElementById("icsWindowInput").addEventListener("input", refreshIcsPreview);
+document.getElementById("icsListSelect").addEventListener("change", refreshIcsPreview);
+document.getElementById("icsCancel").addEventListener("click", ()=> closeOverlay(icsOverlay));
+document.getElementById("icsConfirm").addEventListener("click", ()=>{
+  const plan = buildIcsPlan();
+  const prev = JSON.parse(JSON.stringify(STATE));
+  let target = plan.target;
+  if(!target && plan.c.fresh>0){ target = newList("Calendar", STATE.settings); STATE.lists.push(target); }
+  for(const a of plan.actions){
+    const r = a.r;
+    if(a.type==="new"){
+      target.items.push({
+        id: uid("item"), seriesId: r.recurrence ? "ics_"+r.uid : uid("series"), title: r.title, column:"todo",
+        createdAt: nowISO(), updatedAt: nowISO(), scheduledFor: r.scheduledFor, completedAt:null,
+        recurrence: r.recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false,
+        source:"ics", externalId: r.uid, sticky:false, eventTime: r.eventTime
+      });
+    } else {
+      const ex = a.ex, rolled = ex.rollover && ex.rollover.isRolledOver;
+      ex.title = r.title; ex.eventTime = r.eventTime;
+      if(!rolled) ex.scheduledFor = r.scheduledFor;
+      ex.updatedAt = nowISO();
+    }
+  }
+  STATE.settings.calendarWindowDays = plan.days>0 ? plan.days : 0;
+  persist(); render(); closeOverlay(icsOverlay);
+  toast(`Calendar imported: ${plan.c.fresh} new, ${plan.c.updated} updated`, ()=>{ STATE = prev; persist(); render(); });
+});
 
 /* ============================================================
    BOOT
