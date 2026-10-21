@@ -1,8 +1,8 @@
 # Loop — a daily kanban board
 
-A single-file, local-first kanban board for recurring and one-off daily tasks. No login, no backend, no tracking — everything lives in your browser.
+A single-file, local-first kanban board for recurring and one-off daily tasks. Entries live in cookies, no account needed. 
 
-Built to run straight off GitHub Pages as one HTML file.
+Built to run straight off GitHub Pages as one HTML file or download and run locally.
 
 **Live:** https://bravowhiskybravo.github.io/Loop_kanban/
 
@@ -10,21 +10,21 @@ Built to run straight off GitHub Pages as one HTML file.
 
 - **Kanban columns** — To do / Doing / Done per list, double-tap or drag-and-drop a card to move it
 - **Move between lists** — drag a card onto a different list's column, or pick a new list/column from the item's edit view — no delete-and-retype needed
-- **Clock & timer** — live date/time in the top-left corner; click it to start a countdown (presets or custom minutes). Ends with a visual flash, an in-page beep, and a toast. Survives a page refresh, but — like notifications — only alerts while the tab is open
+- **Clock & timer** — live date/time in the top-left corner; click it to start a countdown (presets or custom minutes). Ends with a visual flash, an in-page beep. Note: only alerts while the tab is open
 - **Recurrence** — repeat items daily, every X days, weekly (with specific weekdays), monthly, or yearly
 - **Rollover** — items left in To do or Doing past end-of-day get flagged and carried into today automatically
 - **Backfill (per list, toggleable)** — if you don't open Loop for a few days, recurring items either catch up one instance per missed day (backfill on) or jump straight to today (backfill off)
 - **Retention (per list)** — keep completed items forever, or auto-clear them after a set number of days
 - **Multi-select** — bulk move, delete, or clear the rollover flag on several cards at once
-- **Undo** — a brief toast with an undo action follows deletes, column moves, list deletes, and destructive imports
+- **Undo** — a brief notice with an undo action follows deletes, column moves, list deletes, and destructive imports
 - **Export** — whole board or single list, as JSON (full fidelity), CSV, or plain text
 - **Import** — JSON only, with three explicit modes: **View** (preview, no changes), **Merge** (add into existing board, with prompts if list names collide), **Replace** (wipe and reload)
 - **Calendar import (.ics)** — pull events from Google, Apple or Outlook Calendar into a list. Past events are skipped, with an adjustable forward window (default 90 days). Calendar events don't roll over by default; mark an event "sticky" to make it roll over. See [Importing a calendar](#importing-a-calendar-ics)
-- **Sharing** — export a list and send the file; no accounts, no real-time collaboration in v1
+
 
 ## Tech stack
 
-- Vanilla HTML/CSS/JS, no build step, no framework, no dependencies
+- Vanilla HTML/CSS/JS
 - Storage: IndexedDB, with an automatic localStorage fallback if IndexedDB is unavailable or its connection drops
 - Fonts: Permanent Marker + Kalam (handwritten/marker feel) for headings and task text, IBM Plex Mono for controls and metadata
 
@@ -47,13 +47,10 @@ Import → "Calendar file (.ics)". You get a preview first (target list, forward
 - Simple repeats (daily, every X days, weekly with weekdays, monthly, yearly) become normal Loop recurrence. Complex rules like "second Tuesday" can't be converted: if still upcoming they import as a single event, otherwise they're skipped and counted in the preview.
 - Calendar events don't roll over if missed. Open one and set "If missed" to "Roll over (sticky)" to change that. An untouched repeating event moves to its next occurrence instead of sitting on an old date.
 
-## Deploying to GitHub Pages
-
-1. Drop `kanban.html` into a repo (rename to `index.html` if you want it at the root of the Pages URL)
-2. Settings → Pages → set the source branch/folder
-3. Done — it's fully static, nothing else to configure
-
-You can also just open the file directly in a browser (`file://`) for local use, though IndexedDB behaves more reliably served over `http(s)`.
+## Deploying 
+Use the live version on my github: https://bravowhiskybravo.github.io/Loop_kanban/
+or
+You can download and open file directly in a browser (`file://`) for local use, though IndexedDB behaves more reliably served over `http(s)`.
 
 ## Data model (JSON export shape)
 
@@ -101,19 +98,11 @@ Recurring items are flat, not template + instance: a card carries its own recurr
 
 ## Known limitations (v1)
 
-- **No push notifications.** Static hosting can't wake the app in the background — reminders, and the built-in timer alert, only fire while the tab is open.
+- **No push notifications.** Static hosting can't wake the app in the background
 - **No real-time collaboration.** Sharing is export/import only; two people editing the same list won't sync live.
 - **Browser storage isn't guaranteed forever.** Safari and some mobile browsers can evict local storage if the site goes unvisited for a long stretch. Export a JSON backup periodically if your data matters.
 - **CSV/text exports are one-way.** Only JSON round-trips back into the app.
 - **Calendar import is a file import, not a live sync.** Re-import the .ics to refresh.
 
-## Backlog / ideas for later
-
-- Native push notifications via a wrapped app (Capacitor/Tauri) or a small backend
-- Real-time collaborative lists (would need a sync layer — breaks the pure local-first model, so deliberately deferred)
-- Custom columns beyond To do / Doing / Done
-- Series-level edit scope (edit this occurrence vs. all future occurrences — currently editing always applies forward)
-- CSV/text import
-- Google Calendar direct connect (sign-in instead of exporting a file)
 
 
