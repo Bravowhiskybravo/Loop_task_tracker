@@ -725,6 +725,21 @@ function nextOccurrenceOnOrAfter(rec, fromISO, todayISO){
 }
 
 /* Run once on load (and after import). Mutates state.lists in place. Returns a summary for toast. */
+/* Remove exact duplicates: repeating cards of the same series on the same date, both still in To do */
+function dedupeSeries(state){
+  let removed = 0;
+  for(const list of state.lists){
+    const seen = new Set();
+    list.items = list.items.filter(it=>{
+      if(!it.recurrence || it.column!=="todo") return true;
+      const k = (it.seriesId||it.id)+"|"+it.scheduledFor;
+      if(seen.has(k)){ removed++; return false; }
+      seen.add(k); return true;
+    });
+  }
+  return removed;
+}
+
 function runDayBoundaryPass(state){
   let rolledCount = 0, spawnedCount = 0, caughtUpDays = 0;
   const seriesOpen = new Set(); // series that already got a spawn during this pass
@@ -761,7 +776,8 @@ function runDayBoundaryPass(state){
       if(item.column === "done" && item.recurrence && !item._spawned){
         const sid = sidOf(item);
         // never spawn if this series already has a live (not-done) card somewhere on the board
-        if(seriesOpen.has(sid) || state.lists.some(l=>l.items.some(x=>x!==item && x.column!=="done" && sidOf(x)===sid))){
+        // ...or a newer card: only the latest card in a series may spawn; older done cards are just history
+        if(seriesOpen.has(sid) || state.lists.some(l=>l.items.some(x=>x!==item && sidOf(x)===sid && (x.column!=="done" || (x.scheduledFor||"") > (item.scheduledFor||""))))){
           item._spawned = true; continue;
         }
         let due = nextDueDate(item.recurrence, item.scheduledFor);
@@ -877,11 +893,16 @@ async function init(){
    open across a day boundary without a reload, nothing would otherwise re-evaluate it. */
 function recheckDayBoundary(){
   if(!STATE) return;
+  const snap = JSON.stringify(STATE);
+  const dupes = dedupeSeries(STATE);
   const {rolledCount, spawnedCount, caughtUpDays} = runDayBoundaryPass(STATE);
   const removed = runRetentionSweep(STATE);
-  if(spawnedCount || rolledCount || removed){
+  if(spawnedCount || rolledCount || removed || dupes){
     persist();
     render();
+  }
+  if(dupes>0){
+    toast(`Removed ${dupes} duplicate repeating card${dupes===1?"":"s"}`, ()=>{ STATE = JSON.parse(snap); persist(); render(); });
   }
   if(caughtUpDays>0){
     toast(`Caught up ${caughtUpDays} missed day${caughtUpDays===1?"":"s"} across your recurring items.`);
