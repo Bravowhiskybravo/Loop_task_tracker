@@ -172,6 +172,7 @@
   body.select-mode .select-check{display:flex;}
   body.select-mode .card{cursor:pointer;}
   .card.selected .select-check{background:var(--ink); border-color:var(--ink); color:#fff;}
+  .note-dot{width:7px; height:7px; border-radius:50%; background:rgba(0,0,0,.38); display:inline-block;}
   .empty-col{font-size:11.5px; color:var(--text-faint); padding:6px 2px; font-style:normal;}
 
   .add-list-card{
@@ -313,7 +314,7 @@
       <label>Days to keep done items</label>
       <input type="number" id="retentionDaysInput" min="1" value="30">
     </div>
-    <div class="field">
+    <div class="field" style="display:none;">
       <label>Backfill missed recurring days</label>
       <div class="chiprow" id="backfillChips">
         <div class="chip" data-v="on">On — catch up every missed day</div>
@@ -339,6 +340,8 @@
   <div class="modal">
     <h2 id="listMenuTitle">List</h2>
     <div class="menu-list">
+      <div class="menu-item" id="menuMoveLeft">◀ Move list left</div>
+      <div class="menu-item" id="menuMoveRight">▶ Move list right</div>
       <div class="menu-item" id="menuEditList">✎ Edit list settings</div>
       <div class="menu-item" id="menuExportJSON">⇧ Export as JSON</div>
       <div class="menu-item" id="menuExportCSV">⇧ Export as CSV</div>
@@ -356,6 +359,10 @@
     <div class="field">
       <label>Title</label>
       <input type="text" id="itemTitleInput" maxlength="140" placeholder="Take out trash">
+    </div>
+    <div class="field">
+      <label>Notes (only shown here)</label>
+      <textarea id="itemNotesInput" maxlength="1000" placeholder="Don't forget recycling"></textarea>
     </div>
     <div class="field">
       <label>Scheduled for</label>
@@ -391,10 +398,10 @@
     </div>
     <div class="helptext" id="editScopeNote" style="display:none;">Editing updates this and future occurrences. Past, completed occurrences are untouched.</div>
     <div class="field" id="stickyField" style="display:none; margin-top:14px;">
-      <label>If missed (calendar event)</label>
+      <label>If missed</label>
       <div class="chiprow" id="stickyChips">
-        <div class="chip" data-v="off">Stay put</div>
-        <div class="chip" data-v="on">Roll over (sticky)</div>
+        <div class="chip" data-v="off">Don't roll over</div>
+        <div class="chip" data-v="on">Roll over</div>
       </div>
     </div>
     <div class="divider"></div>
@@ -459,7 +466,7 @@
       <label>Days</label>
       <input type="number" id="defRetentionDaysInput" min="1" value="30">
     </div>
-    <div class="field">
+    <div class="field" style="display:none;">
       <label>Default backfill</label>
       <div class="chiprow" id="defBackfillChips">
         <div class="chip" data-v="on">On</div>
@@ -724,116 +731,64 @@ function nextOccurrenceOnOrAfter(rec, fromISO, todayISO){
   return c;
 }
 
-/* Run once on load (and after import). Mutates state.lists in place. Returns a summary for toast. */
-/* Remove exact duplicates: repeating cards of the same series on the same date, both still in To do */
-function dedupeSeries(state){
+/* Repeating items are ONE card per series: when done and due again, the same card resets to To do
+   for its next date (no history is kept); when missed, it either rolls over (sticky) or resets. */
+function collapseSeries(state){
+  const rank = it => (it.scheduledFor||"") + (it.column==="done" ? "0" : "1");
+  const best = new Map();
+  for(const list of state.lists) for(const it of list.items){
+    if(!it.recurrence) continue;
+    const sid = it.seriesId || it.id, cur = best.get(sid);
+    if(!cur || rank(it) > rank(cur)) best.set(sid, it);
+  }
   let removed = 0;
   for(const list of state.lists){
-    const seen = new Set();
     list.items = list.items.filter(it=>{
-      if(!it.recurrence || it.column!=="todo") return true;
-      const k = (it.seriesId||it.id)+"|"+it.scheduledFor;
-      if(seen.has(k)){ removed++; return false; }
-      seen.add(k); return true;
+      if(!it.recurrence || best.get(it.seriesId || it.id) === it) return true;
+      removed++; return false;
     });
   }
   return removed;
 }
-
+function resetCard(item, date){
+  item.scheduledFor = date; item.column = "todo"; item.completedAt = null;
+  item.rollover = {isRolledOver:false, rolledFrom:null}; item.updatedAt = nowISO();
+}
+function rollOver(item, today){
+  if(!item.rollover) item.rollover = {isRolledOver:false, rolledFrom:null};
+  if(!item.rollover.isRolledOver) item.rollover.rolledFrom = item.scheduledFor;
+  item.rollover.isRolledOver = true; item.scheduledFor = today; item.updatedAt = nowISO();
+}
 function runDayBoundaryPass(state){
-  let rolledCount = 0, spawnedCount = 0, caughtUpDays = 0;
-  const seriesOpen = new Set(); // series that already got a spawn during this pass
+  let rolledCount = 0, resetCount = 0;
+  const collapsed = collapseSeries(state);
   for(const list of state.lists){
     const today = todayISO(list.eodTime);
-
-    // 1) stale non-done items (todo/doing) that haven't reached today -> roll over in place
     for(const item of list.items){
+      if(item.recurrence){
+        const rec = item.recurrence;
+        if(item.column === "done"){
+          const due = nextDueDate(rec, item.scheduledFor);
+          if(due && due <= today){
+            const occ = nextOccurrenceOnOrAfter(rec, item.scheduledFor, today);
+            if(occ){ resetCard(item, occ); resetCount++; }
+          }
+        } else if(item.scheduledFor && item.scheduledFor < today){
+          if(item.sticky){ rollOver(item, today); rolledCount++; }
+          else {
+            const occ = nextOccurrenceOnOrAfter(rec, item.scheduledFor, today);
+            if(occ){ resetCard(item, occ); resetCount++; }
+          }
+        }
+        continue;
+      }
       if(item.column !== "done" && item.scheduledFor && item.scheduledFor < today){
-        if(item.source === "ics" && !item.sticky){
-          // calendar events stay put when missed; untouched repeating ones advance to their next occurrence
-          if(item.recurrence && item.column === "todo"){
-            const nxt = nextOccurrenceOnOrAfter(item.recurrence, item.scheduledFor, today);
-            if(nxt){ item.scheduledFor = nxt; item.updatedAt = nowISO(); }
-          }
-          continue;
-        }
-        if(!item.rollover) item.rollover = {isRolledOver:false, rolledFrom:null};
-        if(!item.rollover.isRolledOver) item.rollover.rolledFrom = item.scheduledFor;
-        item.rollover.isRolledOver = true;
-        item.scheduledFor = today;
-        item.updatedAt = nowISO();
-        rolledCount++;
+        if(item.source === "ics" && !item.sticky) continue;
+        rollOver(item, today); rolledCount++;
       }
     }
-
-    // 2) done + recurring items that haven't spawned their next occurrence yet
-    const toAdd = [];
-    const sidOf = x => x.seriesId || x.id;
-    const dateTaken = (sid, date) =>
-      state.lists.some(l=>l.items.some(x=>sidOf(x)===sid && x.scheduledFor===date)) ||
-      toAdd.some(x=>sidOf(x)===sid && x.scheduledFor===date);
-    for(const item of list.items){
-      if(item.column === "done" && item.recurrence && !item._spawned){
-        const sid = sidOf(item);
-        // never spawn if this series already has a live (not-done) card somewhere on the board
-        // ...or a newer card: only the latest card in a series may spawn; older done cards are just history
-        if(seriesOpen.has(sid) || state.lists.some(l=>l.items.some(x=>x!==item && sidOf(x)===sid && (x.column!=="done" || (x.scheduledFor||"") > (item.scheduledFor||""))))){
-          item._spawned = true; continue;
-        }
-        let due = nextDueDate(item.recurrence, item.scheduledFor);
-        if(due === null) continue;
-        if(due > today) continue; // not due yet — leave _spawned false so we re-check next time
-
-        item._spawned = true; // only now, since we're actually about to spawn
-        seriesOpen.add(sid);
-
-        if(item.source === "ics"){
-          const occ = nextOccurrenceOnOrAfter(item.recurrence, item.scheduledFor, today);
-          if(occ && !dateTaken(sid, occ)){ toAdd.push(makeInstance(item, occ, false, null)); spawnedCount++; }
-          continue;
-        }
-
-        if(list.backfillEnabled){
-          // spawn one instance per missed occurrence, capped to avoid runaway growth
-          let cursor = due, guard = 0;
-          while(cursor <= today && guard < 60){
-            const isStale = cursor < today;
-            if(!dateTaken(sid, cursor)){
-              const inst = makeInstance(item, cursor, isStale, cursor);
-              if(isStale) inst._spawned = true; // historical catch-up card; only the final (today's) instance continues the series
-              toAdd.push(inst);
-              spawnedCount++;
-              if(isStale) caughtUpDays++;
-            }
-            cursor = nextDueDate(item.recurrence, cursor);
-            guard++;
-            if(cursor===null) break;
-          }
-        } else {
-          // jump straight to today, single instance, no pile-up
-          if(!dateTaken(sid, today)){ toAdd.push(makeInstance(item, today, false, null)); spawnedCount++; }
-        }
-      }
-    }
-    list.items.push(...toAdd);
   }
-  return {rolledCount, spawnedCount, caughtUpDays};
-}
-function makeInstance(sourceItem, scheduledFor, markRolled, rolledFrom){
-  return {
-    id: uid("item"),
-    seriesId: sourceItem.seriesId,
-    title: sourceItem.title,
-    column: "todo",
-    createdAt: nowISO(),
-    updatedAt: nowISO(),
-    scheduledFor,
-    completedAt: null,
-    recurrence: sourceItem.recurrence ? {...sourceItem.recurrence} : undefined,
-    rollover: { isRolledOver: !!markRolled, rolledFrom: markRolled ? rolledFrom : null },
-    _spawned: false,
-    source: sourceItem.source, externalId: sourceItem.externalId, sticky: sourceItem.sticky, eventTime: sourceItem.eventTime
-  };
+  return {rolledCount, resetCount, collapsed};
 }
 
 /* Retention sweep: remove done items past retention window (per list) */
@@ -844,7 +799,7 @@ function runRetentionSweep(state){
     const cutoff = addDays(todayISO(list.eodTime), -Math.max(1,list.retentionDays||30));
     const before = list.items.length;
     list.items = list.items.filter(it=>{
-      if(it.column!=="done") return true;
+      if(it.column!=="done" || it.recurrence) return true;
       const day = it.completedAt ? dateToISO(new Date(it.completedAt)) : it.scheduledFor;
       return day >= cutoff;
     });
@@ -894,21 +849,11 @@ async function init(){
 function recheckDayBoundary(){
   if(!STATE) return;
   const snap = JSON.stringify(STATE);
-  const dupes = dedupeSeries(STATE);
-  const {rolledCount, spawnedCount, caughtUpDays} = runDayBoundaryPass(STATE);
+  const {rolledCount, resetCount, collapsed} = runDayBoundaryPass(STATE);
   const removed = runRetentionSweep(STATE);
-  if(spawnedCount || rolledCount || removed || dupes){
-    persist();
-    render();
-  }
-  if(dupes>0){
-    toast(`Removed ${dupes} duplicate repeating card${dupes===1?"":"s"}`, ()=>{ STATE = JSON.parse(snap); persist(); render(); });
-  }
-  if(caughtUpDays>0){
-    toast(`Caught up ${caughtUpDays} missed day${caughtUpDays===1?"":"s"} across your recurring items.`);
-  } else if(rolledCount>0){
-    toast(`${rolledCount} item${rolledCount===1?"":"s"} rolled over from a previous day.`);
-  }
+  if(rolledCount || resetCount || collapsed || removed){ persist(); render(); }
+  if(collapsed>0) toast(`Merged ${collapsed} duplicate repeating card${collapsed===1?"":"s"} into one`, ()=>{ STATE = JSON.parse(snap); persist(); render(); });
+  if(rolledCount>0) toast(`${rolledCount} item${rolledCount===1?"":"s"} rolled over from a previous day.`);
 }
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) recheckDayBoundary(); });
 setInterval(recheckDayBoundary, 5*60*1000);
@@ -1047,6 +992,11 @@ function renderCard(list, item, idx){
     t.className = "tag recur";
     t.textContent = "↻ " + recurrenceLabel(item.recurrence);
     meta.appendChild(t);
+  }
+  if(item.notes){
+    const d = document.createElement("span");
+    d.className = "note-dot"; d.title = "Has notes (right-click to view)";
+    meta.appendChild(d);
   }
   if(item.eventTime){
     const t = document.createElement("span");
@@ -1571,6 +1521,15 @@ function openListMenu(listId){
   openOverlay(listMenuOverlay);
 }
 document.getElementById("listMenuClose").addEventListener("click", ()=> closeOverlay(listMenuOverlay));
+function moveList(dir){
+  const i = STATE.lists.findIndex(l=>l.id===menuListId), j = i + dir;
+  closeOverlay(listMenuOverlay);
+  if(i<0 || j<0 || j>=STATE.lists.length){ toast(dir<0 ? "Already the first list" : "Already the last list"); return; }
+  const [l] = STATE.lists.splice(i,1); STATE.lists.splice(j,0,l);
+  persist(); render();
+}
+document.getElementById("menuMoveLeft").addEventListener("click", ()=> moveList(-1));
+document.getElementById("menuMoveRight").addEventListener("click", ()=> moveList(1));
 document.getElementById("menuEditList").addEventListener("click", ()=>{ closeOverlay(listMenuOverlay); openListModal(menuListId); });
 document.getElementById("menuDeleteList").addEventListener("click", ()=>{ closeOverlay(listMenuOverlay); openListModal(menuListId); setTimeout(()=>document.getElementById("listDeleteBtn").click(), 50); });
 document.getElementById("menuExportJSON").addEventListener("click", ()=>{ closeOverlay(listMenuOverlay); exportListJSON(menuListId); });
@@ -1587,6 +1546,7 @@ function openItemModal(listId, itemId){
   const item = itemId ? findItem(listId,itemId) : null;
   document.getElementById("itemModalTitle").textContent = item ? "Edit item" : "New item";
   document.getElementById("itemTitleInput").value = item ? item.title : "";
+  document.getElementById("itemNotesInput").value = item ? (item.notes||"") : "";
   const list = findList(listId);
   document.getElementById("itemDateInput").value = item ? item.scheduledFor : todayISO(list.eodTime);
   const rtype = item && item.recurrence ? item.recurrence.type : "none";
@@ -1614,8 +1574,8 @@ function openItemModal(listId, itemId){
     listSelect.appendChild(opt);
   }
   document.getElementById("itemColumnSelect").value = item ? item.column : "todo";
-  document.getElementById("stickyField").style.display = (item && item.source==="ics") ? "block":"none";
   setChip("stickyChips", item && item.sticky ? "on":"off");
+  updateStickyField();
 
   openOverlay(itemModalOverlay);
 }
@@ -1624,12 +1584,14 @@ document.querySelectorAll("#recurChips .chip").forEach(c=>{
     setChip("recurChips", c.dataset.v);
     document.getElementById("intervalField").style.display = c.dataset.v==="everyXDays" ? "block":"none";
     document.getElementById("dowField").style.display = c.dataset.v==="weekly" ? "block":"none";
+    updateStickyField();
   });
 });
 document.querySelectorAll(".dow").forEach(d=> d.addEventListener("click", ()=> d.classList.toggle("active")));
 document.getElementById("itemModalCancel").addEventListener("click", ()=> closeOverlay(itemModalOverlay));
 document.getElementById("itemModalSave").addEventListener("click", ()=>{
   const title = document.getElementById("itemTitleInput").value.trim();
+  const notes = document.getElementById("itemNotesInput").value.trim();
   if(!title){ toast("Give the item a title first."); return; }
   const scheduledFor = document.getElementById("itemDateInput").value || todayISO("00:00");
   const rtype = document.querySelector("#recurChips .chip.active").dataset.v;
@@ -1644,11 +1606,11 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
   const targetCol = document.getElementById("itemColumnSelect").value || "todo";
   if(itemId){
     const item = findItem(listId,itemId);
-    item.title = title; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
+    item.title = title; item.notes = notes; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
     if(recurrence){ recurrence.anchorDate = item.recurrence ? item.recurrence.anchorDate : scheduledFor; }
     if(recurrence && item.recurrence && item.recurrence.until) recurrence.until = item.recurrence.until;
     item.recurrence = recurrence;
-    if(item.source === "ics") item.sticky = document.querySelector("#stickyChips .chip.active").dataset.v === "on";
+    if(document.getElementById("stickyField").style.display !== "none") item.sticky = document.querySelector("#stickyChips .chip.active").dataset.v === "on";
     const curCol = item.column;
     persist(); render(); // save field edits regardless of whether list/column also changed
     closeOverlay(itemModalOverlay);
@@ -1660,7 +1622,8 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
     list.items.push({
       id: uid("item"), seriesId: uid("series"), title, column: targetCol,
       createdAt: nowISO(), updatedAt: nowISO(), scheduledFor, completedAt: targetCol==="done" ? nowISO() : null,
-      recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false
+      recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false, notes,
+      sticky: document.getElementById("stickyField").style.display !== "none" && document.querySelector("#stickyChips .chip.active").dataset.v === "on"
     });
     persist(); render();
     closeOverlay(itemModalOverlay);
@@ -1841,7 +1804,7 @@ function normalizeImportedList(l){
       scheduledFor: it.scheduledFor || todayISO("00:00"), completedAt: it.completedAt || null,
       recurrence: it.recurrence || undefined,
       rollover: it.rollover || {isRolledOver:false, rolledFrom:null}, _spawned: !!it._spawned,
-      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime
+      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime, notes: it.notes
     }))
   };
 }
@@ -1906,6 +1869,12 @@ function resolveCollisions(collisions, i, done){
    ============================================================ */
 const icsOverlay = document.getElementById("icsOverlay");
 let pendingIcs = null;
+function updateStickyField(){
+  const rt = document.querySelector("#recurChips .chip.active");
+  const rec = rt && rt.dataset.v !== "none";
+  const it = editingItemCtx && editingItemCtx.itemId ? findItem(editingItemCtx.listId, editingItemCtx.itemId) : null;
+  document.getElementById("stickyField").style.display = (rec || (it && it.source==="ics")) ? "block" : "none";
+}
 document.querySelectorAll("#stickyChips .chip").forEach(c=>c.addEventListener("click", ()=> setChip("stickyChips", c.dataset.v)));
 
 function fmtTime12(h,m){ const ap=h>=12?"PM":"AM"; let hh=h%12; if(hh===0) hh=12; return hh+":"+String(m).padStart(2,"0")+" "+ap; }
