@@ -365,6 +365,16 @@
       <textarea id="itemNotesInput" maxlength="1000" placeholder="Don't forget recycling"></textarea>
     </div>
     <div class="field">
+      <label>Watch a web address (optional)</label>
+      <input type="text" id="watchUrlInput" placeholder="https://api.github.com/repos/owner/repo/releases/latest">
+      <input type="text" id="watchPatternInput" placeholder='Optional match, e.g. "tag_name":\s*"([^"]+)"' style="margin-top:8px;">
+      <div class="helptext">While Loop is open (about every 30 min) it compares the value. If it changes, a done card moves back to To do and gets a marker. With no match pattern the whole response is compared, which can false-alarm on busy pages. The site must allow browser access (CORS).</div>
+      <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+        <button class="btn small" id="watchTestBtn" type="button">Test now</button>
+        <span id="watchStatus" class="helptext" style="margin:0;"></span>
+      </div>
+    </div>
+    <div class="field">
       <label>Scheduled for</label>
       <input type="date" id="itemDateInput">
     </div>
@@ -841,6 +851,7 @@ async function init(){
 
   recheckDayBoundary();
   render();
+  checkWatchers(false);
 }
 
 /* Re-run the rollover/spawn/retention pass against the current state. Called on load,
@@ -855,8 +866,77 @@ function recheckDayBoundary(){
   if(collapsed>0) toast(`Merged ${collapsed} duplicate repeating card${collapsed===1?"":"s"} into one`, ()=>{ STATE = JSON.parse(snap); persist(); render(); });
   if(rolledCount>0) toast(`${rolledCount} item${rolledCount===1?"":"s"} rolled over from a previous day.`);
 }
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) recheckDayBoundary(); });
-setInterval(recheckDayBoundary, 5*60*1000);
+/* ---- URL watchers: compare a fetched value and bring a done card back to To do when it changes ---- */
+function applyWatch(item, url, pat){
+  if(!url){ delete item.watch; return; }
+  const w = item.watch;
+  if(w && w.url === url && (w.pattern||"") === pat) return;
+  item.watch = {url, pattern: pat||"", lastValue:null, lastChecked:0, lastError:null, alert:false};
+}
+function watchErrorText(e){
+  if(e && e.name === "AbortError") return "Timed out";
+  if(e instanceof SyntaxError) return "Bad match pattern";
+  if(e instanceof TypeError) return "Blocked or unreachable — the site may not allow browser access (CORS)";
+  return (e && e.message) || "Check failed";
+}
+async function fetchWatchValue(url, pattern){
+  const ctl = new AbortController(), t = setTimeout(()=>ctl.abort(), 12000);
+  try{
+    const res = await fetch(url, {cache:"no-store", credentials:"omit", referrerPolicy:"no-referrer", signal:ctl.signal});
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    const text = (await res.text()).slice(0, 500000);
+    if(pattern){
+      const m = new RegExp(pattern).exec(text);
+      if(!m) return "(no match)";
+      return String(m[1] !== undefined ? m[1] : m[0]).slice(0, 120);
+    }
+    let h = 5381;
+    for(let i=0;i<text.length;i++) h = ((h<<5) + h + text.charCodeAt(i)) | 0;
+    return "hash:" + (h>>>0).toString(16);
+  } finally { clearTimeout(t); }
+}
+let watchBusy = false;
+async function checkWatchers(force){
+  if(watchBusy || !STATE) return;
+  watchBusy = true;
+  try{
+    let touched = false, redraw = false;
+    for(const list of STATE.lists) for(const it of list.items){
+      const w = it.watch;
+      if(!w || !w.url) continue;
+      if(it.column === "done" && w.alert){ w.alert = false; redraw = true; }
+      if(!force && w.lastChecked && Date.now() - w.lastChecked < 30*60*1000) continue;
+      touched = true;
+      try{
+        const v = await fetchWatchValue(w.url, w.pattern);
+        if(w.lastError){ redraw = true; }
+        w.lastChecked = Date.now(); w.lastError = null;
+        if(w.lastValue != null && v !== w.lastValue){
+          w.alert = true; w.prev = w.lastValue; redraw = true;
+          if(it.column === "done"){ it.column = "todo"; it.completedAt = null; it.updatedAt = nowISO(); }
+          toast(`"${trim(it.title)}" changed — take a look`);
+        }
+        w.lastValue = v;
+      }catch(e){
+        const msg = watchErrorText(e);
+        if(w.lastError !== msg) redraw = true;
+        w.lastChecked = Date.now(); w.lastError = msg;
+      }
+    }
+    if(touched || redraw) persist();
+    if(redraw) render();
+  } finally { watchBusy = false; }
+}
+document.getElementById("watchTestBtn").addEventListener("click", async ()=>{
+  const url = document.getElementById("watchUrlInput").value.trim(), pat = document.getElementById("watchPatternInput").value.trim();
+  const st = document.getElementById("watchStatus");
+  if(!/^https:\/\//i.test(url)){ st.textContent = "Enter an address starting with https://"; return; }
+  st.textContent = "Checking…";
+  try{ st.textContent = "OK — current value: " + await fetchWatchValue(url, pat); }
+  catch(e){ st.textContent = "⚠ " + watchErrorText(e); }
+});
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ recheckDayBoundary(); checkWatchers(false); } });
+setInterval(()=>{ recheckDayBoundary(); checkWatchers(false); }, 5*60*1000);
 
 /* ============================================================
    RENDER
@@ -997,6 +1077,14 @@ function renderCard(list, item, idx){
     const d = document.createElement("span");
     d.className = "note-dot"; d.title = "Has notes (right-click to view)";
     meta.appendChild(d);
+  }
+  if(item.watch && item.watch.url){
+    const t = document.createElement("span");
+    const alerting = item.watch.alert && item.column !== "done";
+    t.className = "tag" + (alerting ? " rollover" : "");
+    t.textContent = item.watch.lastError ? "⚠ watch" : (alerting ? "● changed" : "◎ watching");
+    t.title = item.watch.lastError || (alerting ? "Changed from: " + (item.watch.prev||"") : "Last value: " + (item.watch.lastValue || "not checked yet"));
+    meta.appendChild(t);
   }
   if(item.eventTime){
     const t = document.createElement("span");
@@ -1547,6 +1635,10 @@ function openItemModal(listId, itemId){
   document.getElementById("itemModalTitle").textContent = item ? "Edit item" : "New item";
   document.getElementById("itemTitleInput").value = item ? item.title : "";
   document.getElementById("itemNotesInput").value = item ? (item.notes||"") : "";
+  const w = item && item.watch;
+  document.getElementById("watchUrlInput").value = w ? w.url : "";
+  document.getElementById("watchPatternInput").value = w ? (w.pattern||"") : "";
+  document.getElementById("watchStatus").textContent = w ? (w.lastError ? "⚠ "+w.lastError : (w.lastValue ? "Last value: "+w.lastValue : "Not checked yet")) : "";
   const list = findList(listId);
   document.getElementById("itemDateInput").value = item ? item.scheduledFor : todayISO(list.eodTime);
   const rtype = item && item.recurrence ? item.recurrence.type : "none";
@@ -1592,6 +1684,9 @@ document.getElementById("itemModalCancel").addEventListener("click", ()=> closeO
 document.getElementById("itemModalSave").addEventListener("click", ()=>{
   const title = document.getElementById("itemTitleInput").value.trim();
   const notes = document.getElementById("itemNotesInput").value.trim();
+  const wUrl = document.getElementById("watchUrlInput").value.trim();
+  const wPat = document.getElementById("watchPatternInput").value.trim();
+  if(wUrl && !/^https:\/\//i.test(wUrl)){ toast("The watch address must start with https://"); return; }
   if(!title){ toast("Give the item a title first."); return; }
   const scheduledFor = document.getElementById("itemDateInput").value || todayISO("00:00");
   const rtype = document.querySelector("#recurChips .chip.active").dataset.v;
@@ -1607,6 +1702,7 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
   if(itemId){
     const item = findItem(listId,itemId);
     item.title = title; item.notes = notes; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
+    applyWatch(item, wUrl, wPat);
     if(recurrence){ recurrence.anchorDate = item.recurrence ? item.recurrence.anchorDate : scheduledFor; }
     if(recurrence && item.recurrence && item.recurrence.until) recurrence.until = item.recurrence.until;
     item.recurrence = recurrence;
@@ -1623,6 +1719,7 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
       id: uid("item"), seriesId: uid("series"), title, column: targetCol,
       createdAt: nowISO(), updatedAt: nowISO(), scheduledFor, completedAt: targetCol==="done" ? nowISO() : null,
       recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false, notes,
+      watch: wUrl ? {url:wUrl, pattern:wPat, lastValue:null, lastChecked:0, lastError:null, alert:false} : undefined,
       sticky: document.getElementById("stickyField").style.display !== "none" && document.querySelector("#stickyChips .chip.active").dataset.v === "on"
     });
     persist(); render();
@@ -1804,7 +1901,7 @@ function normalizeImportedList(l){
       scheduledFor: it.scheduledFor || todayISO("00:00"), completedAt: it.completedAt || null,
       recurrence: it.recurrence || undefined,
       rollover: it.rollover || {isRolledOver:false, rolledFrom:null}, _spawned: !!it._spawned,
-      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime, notes: it.notes
+      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime, notes: it.notes, watch: it.watch
     }))
   };
 }
