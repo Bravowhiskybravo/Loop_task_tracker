@@ -86,6 +86,8 @@
   .brand .dot{color:#b9b17f;}
   .brand small{font-family:var(--font-mono); font-weight:500; font-size:10px; color:var(--text-faint); letter-spacing:.08em; text-transform:uppercase;}
   .spacer{flex:1;}
+  #searchInput{width:150px; min-width:0; background:var(--panel-2); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-family:var(--font-mono); font-size:12.5px; color:var(--text);}
+  #todayFilterBtn.active{background:var(--ink); color:#fff; border-color:var(--ink);}
   .iconbtn{
     background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     width:36px; height:36px; border-radius:9px; display:flex; align-items:center; justify-content:center;
@@ -276,6 +278,9 @@
   </div>
   <div class="brand"><span class="dot">◆</span>Loop<small>daily board</small></div>
   <div class="spacer"></div>
+  <input type="text" id="searchInput" placeholder="Search ( / )" aria-label="Search cards">
+  <button class="iconbtn" id="todayFilterBtn" title="Only today and overdue" aria-label="Today filter">☀</button>
+  <button class="iconbtn" id="helpBtn" title="Help (opens the README)" aria-label="Help">?</button>
   <button class="iconbtn" id="selectToggleBtn" title="Select items" aria-label="Select items">▤</button>
   <button class="iconbtn" id="importBtn" title="Import" aria-label="Import">⇩</button>
   <button class="iconbtn" id="exportBtn" title="Export board" aria-label="Export board">⇧</button>
@@ -363,6 +368,13 @@
     <div class="field">
       <label>Notes (only shown here)</label>
       <textarea id="itemNotesInput" maxlength="1000" placeholder="Don't forget recycling"></textarea>
+    </div>
+    <div class="field">
+      <label>Label (optional)</label>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="itemLabelInput" maxlength="24" placeholder="Work">
+        <input type="color" id="itemLabelColor" value="#7b8cde" style="width:48px; height:40px; padding:2px; border:1px solid var(--border); border-radius:8px; background:var(--panel-2);">
+      </div>
     </div>
     <div class="field">
       <label>Watch a web address (optional)</label>
@@ -486,6 +498,17 @@
     <div class="field">
       <label>Default end of day</label>
       <input type="time" id="defEodInput">
+    </div>
+    <div class="field">
+      <label>Card colors (To do / Doing / Done)</label>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input type="color" id="colTodo"><input type="color" id="colDoing"><input type="color" id="colDone">
+        <button class="btn small" id="colReset" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Backup reminder after (days / edits)</label>
+      <div class="row2"><input type="number" id="backupDaysInput" min="1"><input type="number" id="backupChangesInput" min="10"></div>
     </div>
     <div class="modal-actions">
       <button class="btn" id="settingsClose">Close</button>
@@ -696,7 +719,9 @@ function debounce(fn,ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(
    DEFAULT / EMPTY STATE
    ============================================================ */
 function defaultSettings(){
-  return { defaultRetentionMode:"keep", defaultRetentionDays:30, defaultBackfillEnabled:true, defaultEodTime:"00:00", calendarWindowDays:90 };
+  return { defaultRetentionMode:"keep", defaultRetentionDays:30, defaultBackfillEnabled:true, defaultEodTime:"00:00", calendarWindowDays:90,
+    colors:{todo:"#ffb8ce", doing:"#ffe98a", done:"#bfe8b8"}, backupEveryDays:14, backupEveryChanges:100,
+    lastBackupAt:0, changesSinceBackup:0, nudgeSnoozeUntil:0 };
 }
 function freshState(){
   return { settings: defaultSettings(), lists: [] };
@@ -829,7 +854,7 @@ let lastUndo = null; // {label, apply()}
 let pendingConfirm = null;
 
 const saveDebounced = debounce(()=> saveState(STATE), 300);
-function persist(){ saveDebounced(); }
+function persist(){ if(STATE && STATE.settings) STATE.settings.changesSinceBackup = (STATE.settings.changesSinceBackup||0) + 1; saveDebounced(); }
 
 async function init(){
   let loaded = await loadState();
@@ -849,9 +874,12 @@ async function init(){
   loaded.settings = Object.assign(defaultSettings(), loaded.settings||{});
   STATE = loaded;
 
+  applyColors();
   recheckDayBoundary();
   render();
   checkWatchers(false);
+  checkBackupNudge();
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 }
 
 /* Re-run the rollover/spawn/retention pass against the current state. Called on load,
@@ -935,8 +963,99 @@ document.getElementById("watchTestBtn").addEventListener("click", async ()=>{
   try{ st.textContent = "OK — current value: " + await fetchWatchValue(url, pat); }
   catch(e){ st.textContent = "⚠ " + watchErrorText(e); }
 });
-document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ recheckDayBoundary(); checkWatchers(false); } });
-setInterval(()=>{ recheckDayBoundary(); checkWatchers(false); }, 5*60*1000);
+/* ---- card colors ---- */
+function shade(hex, f){
+  const n = parseInt(hex.slice(1),16), c = x => Math.round(x*f).toString(16).padStart(2,"0");
+  return "#" + c((n>>16)&255) + c((n>>8)&255) + c(n&255);
+}
+function applyColors(){
+  const c = (STATE && STATE.settings.colors) || {};
+  for(const k of ["todo","doing","done"]){
+    if(!/^#[0-9a-f]{6}$/i.test(c[k]||"")) continue;
+    document.documentElement.style.setProperty("--post-"+k, c[k]);
+    document.documentElement.style.setProperty("--post-"+k+"-border", shade(c[k], 0.85));
+  }
+}
+document.getElementById("colReset").addEventListener("click", ()=>{
+  const d = defaultSettings().colors;
+  document.getElementById("colTodo").value = d.todo; document.getElementById("colDoing").value = d.doing; document.getElementById("colDone").value = d.done;
+});
+
+/* ---- backup nudge ---- */
+function toastChoices(msg, choices){
+  const el = document.createElement("div"); el.className = "toast";
+  const span = document.createElement("span"); span.textContent = msg; el.appendChild(span);
+  for(const c of choices){
+    const b = document.createElement("button"); b.textContent = c.label;
+    b.addEventListener("click", ()=>{ c.fn(); el.remove(); });
+    el.appendChild(b);
+  }
+  toastWrap.appendChild(el);
+  setTimeout(()=> el.remove(), 30000);
+}
+function markBackedUp(){
+  STATE.settings.lastBackupAt = Date.now(); STATE.settings.changesSinceBackup = 0;
+  let removed = false;
+  for(const l of STATE.lists){ const n = l.items.length; l.items = l.items.filter(it=>it.source!=="backup"); if(l.items.length!==n) removed = true; }
+  saveDebounced(); if(removed) render();
+}
+function addBackupCard(){
+  const list = STATE.lists[0];
+  if(!list || STATE.lists.some(l=>l.items.some(it=>it.source==="backup"))) return;
+  list.items.push({
+    id: uid("item"), seriesId: uid("series"), title:"Back up Loop (export JSON)", column:"todo",
+    createdAt: nowISO(), updatedAt: nowISO(), scheduledFor: todayISO(list.eodTime), completedAt:null,
+    rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false, source:"backup",
+    notes:"Export → Whole board — JSON (full backup)"
+  });
+  persist(); render();
+}
+let nudged = false;
+function checkBackupNudge(){
+  if(nudged || !STATE) return;
+  const s = STATE.settings, now = Date.now();
+  if(!s.lastBackupAt){ s.lastBackupAt = now; saveDebounced(); return; }
+  if(now < (s.nudgeSnoozeUntil||0)) return;
+  const byDays = now - s.lastBackupAt > (s.backupEveryDays||14)*86400000;
+  const byEdits = (s.changesSinceBackup||0) >= (s.backupEveryChanges||100);
+  if(!byDays && !byEdits) return;
+  nudged = true;
+  toastChoices(byDays ? "It's been a while since your last backup." : "Lots of changes since your last backup.", [
+    {label:"DO IT", fn:()=> document.getElementById("exportAllJSON").click()},
+    {label:"LATER", fn:()=>{ s.nudgeSnoozeUntil = now + 3*86400000; addBackupCard(); }},
+    {label:"FORGET", fn:()=>{ s.nudgeSnoozeUntil = now + 86400000; saveDebounced(); }}
+  ]);
+}
+
+/* ---- search, filter, help, shortcuts ---- */
+const searchEl = document.getElementById("searchInput");
+searchEl.addEventListener("input", ()=>{ searchQ = searchEl.value.trim().toLowerCase(); render(); });
+document.getElementById("todayFilterBtn").addEventListener("click", (e)=>{
+  todayOnly = !todayOnly; e.currentTarget.classList.toggle("active", todayOnly); render();
+});
+document.getElementById("helpBtn").addEventListener("click", ()=>{
+  window.open("https://github.com/bravowhiskybravo/Loop_kanban#readme", "_blank", "noopener");
+});
+document.addEventListener("keydown", (e)=>{
+  const tag = (e.target.tagName||"").toLowerCase();
+  const typing = tag==="input" || tag==="textarea" || tag==="select" || e.target.isContentEditable;
+  const openOv = document.querySelector(".overlay.open");
+  if(e.key==="Escape"){
+    if(openOv){ closeOverlay(openOv); return; }
+    if(searchQ || document.activeElement===searchEl){ searchEl.value = ""; searchQ = ""; searchEl.blur(); render(); }
+    return;
+  }
+  if(typing || openOv || e.ctrlKey || e.metaKey || e.altKey || !STATE) return;
+  if(e.key==="/"){ e.preventDefault(); searchEl.focus(); }
+  else if(e.key==="n" && STATE.lists[0]){ e.preventDefault(); openItemModal(STATE.lists[0].id, null); }
+  else if(e.key==="l"){ e.preventDefault(); openListModal(null); }
+  else if(e.key==="s"){ document.getElementById("selectToggleBtn").click(); }
+  else if(e.key==="t"){ clockWidgetEl.click(); }
+  else if(e.key==="?"){ document.getElementById("helpBtn").click(); }
+});
+
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden){ recheckDayBoundary(); checkWatchers(false); checkBackupNudge(); } });
+setInterval(()=>{ recheckDayBoundary(); checkWatchers(false); checkBackupNudge(); }, 5*60*1000);
 
 /* ============================================================
    RENDER
@@ -965,6 +1084,20 @@ function render(){
 
 const COL_LABELS = {todo:"To do", doing:"Doing", done:"Done"};
 
+function sortedColumnItems(list, col){
+  return list.items.filter(it=>it.column===col).sort((a,b)=>{
+    if(a.pos!==undefined && b.pos!==undefined) return a.pos - b.pos;
+    if(a.pos!==undefined) return -1;
+    if(b.pos!==undefined) return 1;
+    return (a.scheduledFor||"").localeCompare(b.scheduledFor||"") || (b.updatedAt||"").localeCompare(a.updatedAt||"");
+  });
+}
+let searchQ = "", todayOnly = false;
+function itemVisible(it){
+  if(todayOnly && !(it.scheduledFor && it.scheduledFor <= todayISO(STATE.settings.defaultEodTime))) return false;
+  if(searchQ) return ((it.title||"")+" "+(it.notes||"")+" "+(it.label||"")).toLowerCase().includes(searchQ);
+  return true;
+}
 function renderList(list){
   const el = document.createElement("div");
   el.className = "list";
@@ -1000,9 +1133,7 @@ function renderColumn(list, colKey){
   wrap.className = "col";
   wrap.dataset.col = colKey;
 
-  const items = list.items
-    .filter(it=>it.column===colKey)
-    .sort((a,b)=> (a.scheduledFor||"").localeCompare(b.scheduledFor||"") || (b.updatedAt||"").localeCompare(a.updatedAt||""));
+  const items = sortedColumnItems(list, colKey).filter(itemVisible);
 
   const head = document.createElement("div");
   head.className = "col-head";
@@ -1071,6 +1202,14 @@ function renderCard(list, item, idx){
     const t = document.createElement("span");
     t.className = "tag recur";
     t.textContent = "↻ " + recurrenceLabel(item.recurrence);
+    meta.appendChild(t);
+  }
+  if(item.label){
+    const t = document.createElement("span");
+    const col = item.labelColor || "#7b8cde", n = parseInt(col.slice(1),16);
+    const lum = (((n>>16)&255)*299 + ((n>>8)&255)*587 + (n&255)*114) / 1000;
+    t.className = "tag"; t.textContent = item.label;
+    t.style.background = col; t.style.color = lum > 150 ? "#1b1d22" : "#fff";
     meta.appendChild(t);
   }
   if(item.notes){
@@ -1189,10 +1328,32 @@ function attachDrag(card){
     card.classList.remove("dragging");
     clearDropHover();
     if(zone && dragItem){
-      moveItemAcross(dragItem.listId, dragItem.itemId, zone.dataset.listId, zone.dataset.col, true);
+      dropOn(zone, t.clientY);
     }
     dragging=false; dragItem=null;
   });
+}
+function dropOn(zone, y){
+  const itemId = dragItem.itemId, src = dragItem.listId, tl = zone.dataset.listId, col = zone.dataset.col;
+  let beforeId = null;
+  for(const c of zone.querySelectorAll(".card")){
+    const r = c.getBoundingClientRect();
+    if(y < r.top + r.height/2){ beforeId = c.dataset.itemId; break; }
+  }
+  if(beforeId === itemId) return;
+  moveItemAcross(src, itemId, tl, col, true);
+  reorderColumn(tl, col, itemId, beforeId);
+}
+function reorderColumn(listId, col, itemId, beforeId){
+  const list = findList(listId); if(!list) return;
+  const moved = list.items.find(it=>it.id===itemId);
+  if(!moved || moved.column!==col) return;
+  const arr = sortedColumnItems(list, col).filter(it=>it.id!==itemId);
+  let idx = beforeId ? arr.findIndex(it=>it.id===beforeId) : -1;
+  if(idx<0) idx = arr.length;
+  arr.splice(idx,0,moved);
+  arr.forEach((it,i)=>{ it.pos = i*10; });
+  persist(); render();
 }
 function clearDropHover(){ document.querySelectorAll(".dropzone.hover").forEach(z=>z.classList.remove("hover")); }
 function attachDropZone(zone){
@@ -1200,7 +1361,7 @@ function attachDropZone(zone){
   zone.addEventListener("dragleave",()=> zone.classList.remove("hover"));
   zone.addEventListener("drop",(e)=>{
     e.preventDefault(); zone.classList.remove("hover");
-    if(dragItem){ moveItemAcross(dragItem.listId, dragItem.itemId, zone.dataset.listId, zone.dataset.col, true); }
+    if(dragItem){ dropOn(zone, e.clientY); }
   });
 }
 
@@ -1224,7 +1385,7 @@ function moveItem(listId, itemId, toCol, viaAdvance){
   if(!item || item.column===toCol) return;
   const prevCol = item.column;
   const prevCompletedAt = item.completedAt;
-  item.column = toCol;
+  item.column = toCol; delete item.pos;
   item.updatedAt = nowISO();
   if(toCol==="done"){ item.completedAt = nowISO(); }
   else { item.completedAt = null; }
@@ -1251,7 +1412,7 @@ function moveItemAcross(sourceListId, itemId, targetListId, toCol, viaDrag){
   if(idx===-1) return;
   const [moved] = sourceList.items.splice(idx,1);
   const prevCol = moved.column, prevCompletedAt = moved.completedAt;
-  moved.column = toCol;
+  moved.column = toCol; delete moved.pos;
   moved.updatedAt = nowISO();
   moved.completedAt = toCol==="done" ? nowISO() : null;
   // recurrence and seriesId travel with the item as-is; future spawns will read the
@@ -1635,6 +1796,8 @@ function openItemModal(listId, itemId){
   document.getElementById("itemModalTitle").textContent = item ? "Edit item" : "New item";
   document.getElementById("itemTitleInput").value = item ? item.title : "";
   document.getElementById("itemNotesInput").value = item ? (item.notes||"") : "";
+  document.getElementById("itemLabelInput").value = item ? (item.label||"") : "";
+  document.getElementById("itemLabelColor").value = (item && item.labelColor) || "#7b8cde";
   const w = item && item.watch;
   document.getElementById("watchUrlInput").value = w ? w.url : "";
   document.getElementById("watchPatternInput").value = w ? (w.pattern||"") : "";
@@ -1686,6 +1849,8 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
   const notes = document.getElementById("itemNotesInput").value.trim();
   const wUrl = document.getElementById("watchUrlInput").value.trim();
   const wPat = document.getElementById("watchPatternInput").value.trim();
+  const lbl = document.getElementById("itemLabelInput").value.trim();
+  const lblColor = document.getElementById("itemLabelColor").value;
   if(wUrl && !/^https:\/\//i.test(wUrl)){ toast("The watch address must start with https://"); return; }
   if(!title){ toast("Give the item a title first."); return; }
   const scheduledFor = document.getElementById("itemDateInput").value || todayISO("00:00");
@@ -1703,6 +1868,7 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
     const item = findItem(listId,itemId);
     item.title = title; item.notes = notes; item.scheduledFor = scheduledFor; item.updatedAt = nowISO();
     applyWatch(item, wUrl, wPat);
+    item.label = lbl || undefined; item.labelColor = lbl ? lblColor : undefined;
     if(recurrence){ recurrence.anchorDate = item.recurrence ? item.recurrence.anchorDate : scheduledFor; }
     if(recurrence && item.recurrence && item.recurrence.until) recurrence.until = item.recurrence.until;
     item.recurrence = recurrence;
@@ -1719,6 +1885,7 @@ document.getElementById("itemModalSave").addEventListener("click", ()=>{
       id: uid("item"), seriesId: uid("series"), title, column: targetCol,
       createdAt: nowISO(), updatedAt: nowISO(), scheduledFor, completedAt: targetCol==="done" ? nowISO() : null,
       recurrence, rollover:{isRolledOver:false, rolledFrom:null}, _spawned:false, notes,
+      label: lbl || undefined, labelColor: lbl ? lblColor : undefined,
       watch: wUrl ? {url:wUrl, pattern:wPat, lastValue:null, lastChecked:0, lastError:null, alert:false} : undefined,
       sticky: document.getElementById("stickyField").style.display !== "none" && document.querySelector("#stickyChips .chip.active").dataset.v === "on"
     });
@@ -1742,6 +1909,12 @@ document.getElementById("settingsBtn").addEventListener("click", ()=>{
   document.getElementById("defRetentionDaysInput").value = STATE.settings.defaultRetentionDays;
   setChip("defBackfillChips", STATE.settings.defaultBackfillEnabled ? "on":"off");
   document.getElementById("defEodInput").value = STATE.settings.defaultEodTime;
+  const cs = STATE.settings.colors || {};
+  document.getElementById("colTodo").value = cs.todo || "#ffb8ce";
+  document.getElementById("colDoing").value = cs.doing || "#ffe98a";
+  document.getElementById("colDone").value = cs.done || "#bfe8b8";
+  document.getElementById("backupDaysInput").value = STATE.settings.backupEveryDays || 14;
+  document.getElementById("backupChangesInput").value = STATE.settings.backupEveryChanges || 100;
   openOverlay(settingsOverlay);
 });
 document.querySelectorAll("#defRetentionChips .chip").forEach(c=>{
@@ -1757,6 +1930,10 @@ document.getElementById("settingsSave").addEventListener("click", ()=>{
   STATE.settings.defaultRetentionDays = parseInt(document.getElementById("defRetentionDaysInput").value,10) || 30;
   STATE.settings.defaultBackfillEnabled = document.querySelector("#defBackfillChips .chip.active").dataset.v==="on";
   STATE.settings.defaultEodTime = document.getElementById("defEodInput").value || "00:00";
+  STATE.settings.colors = {todo:document.getElementById("colTodo").value, doing:document.getElementById("colDoing").value, done:document.getElementById("colDone").value};
+  STATE.settings.backupEveryDays = parseInt(document.getElementById("backupDaysInput").value,10) || 14;
+  STATE.settings.backupEveryChanges = parseInt(document.getElementById("backupChangesInput").value,10) || 100;
+  applyColors();
   persist();
   closeOverlay(settingsOverlay);
   toast("Defaults saved");
@@ -1786,6 +1963,7 @@ document.getElementById("exportAllJSON").addEventListener("click", ()=>{
     lists: STATE.lists.map(l=>({...l, items: l.items.map(cleanItemForExport)}))
   };
   download("loop-board-"+todayISO("00:00")+".json", JSON.stringify(payload,null,2), "application/json");
+  markBackedUp();
   closeOverlay(document.getElementById("exportOverlay"));
   toast("Board exported");
 });
@@ -1901,7 +2079,7 @@ function normalizeImportedList(l){
       scheduledFor: it.scheduledFor || todayISO("00:00"), completedAt: it.completedAt || null,
       recurrence: it.recurrence || undefined,
       rollover: it.rollover || {isRolledOver:false, rolledFrom:null}, _spawned: !!it._spawned,
-      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime, notes: it.notes, watch: it.watch
+      source: it.source, externalId: it.externalId, sticky: it.sticky, eventTime: it.eventTime, notes: it.notes, watch: it.watch, label: it.label, labelColor: it.labelColor, pos: it.pos
     }))
   };
 }
