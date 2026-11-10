@@ -4,7 +4,7 @@ A single-file, local-first kanban board for recurring and one-off daily tasks. E
 
 Built to run off GitHub Pages as one HTML file. (link below) 
 
-**Live:** https://bravowhiskybravo.github.io/Loop_kanban/
+**Live:** https://bravowhiskybravo.github.io/Loop_task_tracker/
 
 ## Features
 
